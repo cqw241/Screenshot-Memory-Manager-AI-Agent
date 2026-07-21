@@ -1,5 +1,10 @@
 import { describe, expect, it } from '@ohos/hypium';
-import { ConfigState, EncryptedSecret, RuntimeModelConfig } from '../main/ets/models/ModelConfig';
+import {
+  ConfigState,
+  EncryptedSecret,
+  RuntimeModelConfig,
+  StoredConfigEnvelope
+} from '../main/ets/models/ModelConfig';
 import { ConfigRepository } from '../main/ets/services/ConfigRepository';
 import { KeyValueStore, SecretCipher } from '../main/ets/services/ConfigStoragePorts';
 
@@ -112,6 +117,29 @@ export default function configRepositoryTest() {
       store.values.set('activeSlot', 'A');
       store.values.set('configSlotA', '{broken');
       const repository: ConfigRepository = new ConfigRepository(store, new FakeCipher());
+      expect(await repository.getState()).assertEqual(ConfigState.CORRUPTED);
+    });
+
+    it('marks a HUKS-equivalent decryption failure as corrupted', 0, async () => {
+      const store: FakeStore = new FakeStore();
+      const cipher: FakeCipher = new FakeCipher();
+      const repository: ConfigRepository = new ConfigRepository(store, cipher);
+      await repository.replaceVerified(config('https://example.com/v1', 'device-key', 'vision-model'));
+      cipher.failDecrypt = true;
+
+      expect(await repository.getState()).assertEqual(ConfigState.CORRUPTED);
+    });
+
+    it('marks an incompatible stored schema as corrupted', 0, async () => {
+      const store: FakeStore = new FakeStore();
+      const repository: ConfigRepository = new ConfigRepository(store, new FakeCipher());
+      await repository.replaceVerified(config('https://example.com/v1', 'device-key', 'vision-model'));
+      const active: string = await store.getString('activeSlot');
+      const slotKey: string = active === 'A' ? 'configSlotA' : 'configSlotB';
+      const envelope: StoredConfigEnvelope = JSON.parse(await store.getString(slotKey)) as StoredConfigEnvelope;
+      envelope.schemaVersion = 999;
+      await store.putString(slotKey, JSON.stringify(envelope));
+
       expect(await repository.getState()).assertEqual(ConfigState.CORRUPTED);
     });
   });

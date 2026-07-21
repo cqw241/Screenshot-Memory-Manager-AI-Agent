@@ -4,7 +4,7 @@ import {
   StoredConfigEnvelope,
   VerifiedConfigMetadata
 } from '../models/ModelConfig';
-import { KeyValueStore, SecretCipher, VerifiedConfigWriter } from './ConfigStoragePorts';
+import { ConfigStateReader, KeyValueStore, SecretCipher, VerifiedConfigWriter } from './ConfigStoragePorts';
 
 const ACTIVE_SLOT_KEY: string = 'activeSlot';
 const SLOT_A_KEY: string = 'configSlotA';
@@ -22,7 +22,7 @@ interface LoadedConfig {
   apiKey: string;
 }
 
-export class ConfigRepository implements VerifiedConfigWriter {
+export class ConfigRepository implements ConfigStateReader, VerifiedConfigWriter {
   private readonly store: KeyValueStore;
   private readonly cipher: SecretCipher;
 

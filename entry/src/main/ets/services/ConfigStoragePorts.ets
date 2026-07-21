@@ -1,4 +1,4 @@
-import { EncryptedSecret, RuntimeModelConfig } from '../models/ModelConfig';
+import { ConfigState, EncryptedSecret, RuntimeModelConfig } from '../models/ModelConfig';
 
 export interface SecretCipher {
   encrypt(plainText: string): Promise<EncryptedSecret>;
@@ -13,4 +13,8 @@ export interface KeyValueStore {
 
 export interface VerifiedConfigWriter {
   replaceVerified(config: RuntimeModelConfig): Promise<void>;
+}
+
+export interface ConfigStateReader {
+  getState(): Promise<ConfigState>;
 }

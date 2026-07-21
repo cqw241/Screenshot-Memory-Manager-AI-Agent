@@ -9,6 +9,7 @@ import {
   RECOMMENDED_MODELS,
   targetHost
 } from '../models/EndpointCatalog';
+import { AppPage, StartupRoute } from '../models/AppFlow';
 import { VerifiedConfigMetadata } from '../models/ModelConfig';
 import {
   VerificationCandidate,
@@ -23,10 +24,13 @@ import { createConfigRepository } from '../services/ConfigRepositoryFactory';
 import { HarmonyHttpTransport } from '../services/HarmonyHttpTransport';
 import { parseOrigin } from '../services/UrlPreflight';
 import { VisionVerificationGate } from '../services/VisionVerificationGate';
+import { StartupRouter } from '../services/StartupRouter';
 
 @Entry
 @Component
 struct Index {
+  @State private currentPage: AppPage = AppPage.LOADING;
+  @State private recoveryRequired: boolean = false;
   @State private baseURL: string = '';
   @State private apiKey: string = '';
   @State private model: string = '';
@@ -38,6 +42,7 @@ struct Index {
   @State private errorCategory: string = '';
   @State private errorMessage: string = '';
   @State private verificationSucceeded: boolean = false;
+  @State private activeModel: string = '';
 
   private repository?: ConfigRepository;
   private coordinator?: ConfigVerificationCoordinator;
@@ -49,26 +54,88 @@ struct Index {
       new VisionVerificationGate(new HarmonyHttpTransport()),
       this.repository
     );
-    this.loadExistingConfiguration();
+    this.resolveStartupRoute();
   }
 
-  private async loadExistingConfiguration(): Promise<void> {
+  private async resolveStartupRoute(): Promise<void> {
+    if (this.repository === undefined) {
+      return;
+    }
+    const route: StartupRoute = await new StartupRouter(this.repository).resolve();
+    this.recoveryRequired = route.recoveryRequired;
+    if (route.page === AppPage.HOME) {
+      await this.loadHomeMetadata();
+    } else {
+      this.resetDraft();
+      this.currentPage = route.page;
+    }
+  }
+
+  private async loadHomeMetadata(): Promise<void> {
     if (this.repository === undefined) {
       return;
     }
     try {
       const metadata: VerifiedConfigMetadata | undefined = await this.repository.getMetadata();
       if (metadata !== undefined) {
-        this.baseURL = metadata.baseURL;
-        this.model = metadata.model;
-        this.hasSavedKey = true;
-        this.customSourceTrusted = !isKnownOfficialOrigin(metadata.baseURL) &&
-          metadata.trustedOrigin === parseOrigin(metadata.baseURL);
-        this.loopbackWarningAccepted = false;
+        this.activeModel = metadata.model;
+        this.currentPage = AppPage.HOME;
+      } else {
+        this.recoveryRequired = true;
+        this.resetDraft();
+        this.currentPage = AppPage.WIZARD;
       }
     } catch (_error) {
-      // 损坏配置的可恢复启动说明在 Task 1.5 统一处理。
+      this.recoveryRequired = true;
+      this.resetDraft();
+      this.currentPage = AppPage.WIZARD;
     }
+  }
+
+  private resetDraft(): void {
+    this.baseURL = '';
+    this.apiKey = '';
+    this.model = '';
+    this.hasSavedKey = false;
+    this.advancedExpanded = false;
+    this.resetOriginConfirmations();
+    this.clearError();
+  }
+
+  private async openSettings(): Promise<void> {
+    if (this.repository === undefined) {
+      return;
+    }
+    try {
+      const metadata: VerifiedConfigMetadata | undefined = await this.repository.getMetadata();
+      if (metadata === undefined) {
+        this.recoveryRequired = true;
+        this.resetDraft();
+        this.currentPage = AppPage.WIZARD;
+        return;
+      }
+      this.baseURL = metadata.baseURL;
+      this.apiKey = '';
+      this.model = metadata.model;
+      this.hasSavedKey = true;
+      this.customSourceTrusted = !isKnownOfficialOrigin(metadata.baseURL) &&
+        metadata.trustedOrigin === parseOrigin(metadata.baseURL);
+      this.loopbackWarningAccepted = false;
+      this.clearError();
+      this.currentPage = AppPage.SETTINGS;
+    } catch (_error) {
+      this.recoveryRequired = true;
+      this.resetDraft();
+      this.currentPage = AppPage.WIZARD;
+    }
+  }
+
+  private cancelSettings(): void {
+    if (this.isLoading) {
+      return;
+    }
+    this.resetDraft();
+    this.currentPage = AppPage.HOME;
   }
 
   private useTemplate(template: EndpointTemplate): void {
@@ -124,6 +191,9 @@ struct Index {
       this.hasSavedKey = true;
       this.customSourceTrusted = !isKnownOfficialOrigin(success.normalizedBaseURL);
       this.verificationSucceeded = true;
+      this.activeModel = this.model.trim();
+      this.recoveryRequired = false;
+      this.currentPage = AppPage.HOME;
     } catch (error) {
       if (error instanceof VerificationError) {
         this.errorCategory = error.category;
@@ -340,9 +410,28 @@ struct Index {
     .borderRadius(16)
   }
 
-  build() {
+  @Builder
+  private WizardPage() {
     Scroll() {
       Column({ space: 24 }) {
+        if (this.currentPage === AppPage.SETTINGS) {
+          Row() {
+            Button('取消')
+              .fontSize(13)
+              .fontColor('#5A574F')
+              .backgroundColor('#E8E3D8')
+              .borderRadius(12)
+              .height(38)
+              .enabled(!this.isLoading)
+              .onClick(() => this.cancelSettings())
+            Blank()
+            Text('修改失败不会影响当前配置')
+              .fontSize(11)
+              .fontColor('#858178')
+          }
+          .width('100%')
+        }
+
         Row() {
           Column({ space: 5 }) {
             Text('拾光 · MODEL GATE')
@@ -350,7 +439,7 @@ struct Index {
               .fontWeight(FontWeight.Bold)
               .fontColor('#A65B24')
               .letterSpacing(1.4)
-            Text(this.hasSavedKey ? '重新校准你的视觉模型' : '先让拾光学会看见')
+            Text(this.currentPage === AppPage.SETTINGS ? '重新校准你的视觉模型' : '先让拾光学会看见')
               .fontSize(30)
               .fontWeight(FontWeight.Bold)
               .fontColor('#20201D')
@@ -367,6 +456,38 @@ struct Index {
         }
         .width('100%')
         .alignItems(VerticalAlign.Top)
+
+        if (this.recoveryRequired) {
+          Row({ space: 12 }) {
+            Text('↻')
+              .fontSize(20)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#FFFDF8')
+              .width(36)
+              .height(36)
+              .textAlign(TextAlign.Center)
+              .backgroundColor('#A65B24')
+              .borderRadius(18)
+            Column({ space: 4 }) {
+              Text('需要重新建立模型连接')
+                .fontSize(15)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#5E351F')
+              Text('已保存配置无法完整读取或解密。为保护凭证，拾光不会尝试继续使用它；请重新填写三项配置并通过视觉验证。')
+                .fontSize(13)
+                .fontColor('#79513B')
+                .lineHeight(20)
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Top)
+          .padding(16)
+          .backgroundColor('#FFF4E8')
+          .border({ width: 1, color: '#E6BD98' })
+          .borderRadius(18)
+        }
 
         Column({ space: 14 }) {
           this.SectionHeading('QUICK START', '选择服务端点', '模板只填写地址，不会修改或锁定模型。')
@@ -494,6 +615,14 @@ struct Index {
 
         if (this.errorMessage.length > 0) {
           this.ErrorPanel()
+          if (this.currentPage === AppPage.SETTINGS) {
+            Text('旧的已验证配置仍在安全使用；你可以修改草稿后重试，或取消返回时间轴。')
+              .fontSize(12)
+              .fontColor('#6F6B62')
+              .lineHeight(18)
+              .width('100%')
+              .padding({ left: 4, right: 4 })
+          }
         }
 
         if (this.verificationSucceeded) {
@@ -544,5 +673,166 @@ struct Index {
     .height('100%')
     .scrollBar(BarState.Off)
     .backgroundColor('#F2EFE7')
+  }
+
+  @Builder
+  private LoadingPage() {
+    Column({ space: 20 }) {
+      Stack() {
+        Circle()
+          .width(72)
+          .height(72)
+          .fill('#E5DDD0')
+        Text('拾')
+          .fontSize(26)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#2C4438')
+      }
+      LoadingProgress()
+        .width(28)
+        .height(28)
+        .color('#A65B24')
+      Column({ space: 6 }) {
+        Text('正在打开你的时间轴')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#282721')
+        Text('安全检查已验证的模型配置…')
+          .fontSize(13)
+          .fontColor('#817D74')
+      }
+      .alignItems(HorizontalAlign.Center)
+    }
+    .width('100%')
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .backgroundColor('#F2EFE7')
+  }
+
+  @Builder
+  private TimelinePage() {
+    Column() {
+      Column({ space: 28 }) {
+        Row() {
+          Column({ space: 4 }) {
+            Text('拾光 · TIMELINE')
+              .fontSize(11)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#A65B24')
+              .letterSpacing(1.4)
+            Text('你的时间轴')
+              .fontSize(30)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#20201D')
+          }
+          .layoutWeight(1)
+          .alignItems(HorizontalAlign.Start)
+          Button('模型设置  ···')
+            .fontSize(13)
+            .fontColor('#FFFDF8')
+            .backgroundColor('#2C4438')
+            .borderRadius(14)
+            .height(42)
+            .onClick(() => this.openSettings())
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+
+        Column({ space: 20 }) {
+          Stack({ alignContent: Alignment.Center }) {
+            Circle()
+              .width(104)
+              .height(104)
+              .fill('#EEE8DB')
+            Circle()
+              .width(66)
+              .height(66)
+              .fill('#FFFDF8')
+              .stroke('#D8CEBB')
+              .strokeWidth(1)
+            Text('＋')
+              .fontSize(30)
+              .fontColor('#A65B24')
+          }
+          Column({ space: 8 }) {
+            Text('第一段记忆，等待抵达')
+              .fontSize(21)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#292823')
+            Text('模型连接已经就绪。后续 Story 会在这里加入截图导入、理解结果和可回望的时间卡片。')
+              .fontSize(13)
+              .fontColor('#77736A')
+              .lineHeight(20)
+              .textAlign(TextAlign.Center)
+              .width('82%')
+          }
+          .alignItems(HorizontalAlign.Center)
+          if (this.activeModel.length > 0) {
+            Text(`当前模型 · ${this.activeModel}`)
+              .fontSize(11)
+              .fontColor('#5C655E')
+              .padding({ left: 12, right: 12, top: 7, bottom: 7 })
+              .backgroundColor('#E8EFE9')
+              .borderRadius(10)
+          }
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .justifyContent(FlexAlign.Center)
+      }
+      .layoutWeight(1)
+      .width('100%')
+      .padding({ left: 20, right: 20, top: 30 })
+
+      Row() {
+        Column({ space: 5 }) {
+          Text('●')
+            .fontSize(16)
+            .fontColor('#A65B24')
+          Text('时间轴')
+            .fontSize(11)
+            .fontWeight(FontWeight.Bold)
+            .fontColor('#3B3933')
+        }
+        .layoutWeight(1)
+        Column({ space: 5 }) {
+          Text('◇')
+            .fontSize(18)
+            .fontColor('#AAA69C')
+          Text('搜索 · 后续')
+            .fontSize(11)
+            .fontColor('#99958C')
+        }
+        .layoutWeight(1)
+        Column({ space: 5 }) {
+          Text('○')
+            .fontSize(18)
+            .fontColor('#AAA69C')
+          Text('收藏 · 后续')
+            .fontSize(11)
+            .fontColor('#99958C')
+        }
+        .layoutWeight(1)
+      }
+      .width('100%')
+      .height(76)
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: 14, right: 14 })
+      .backgroundColor('#FFFDF8')
+      .border({ width: { top: 1 }, color: '#E2DBCE' })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor('#F2EFE7')
+  }
+
+  build() {
+    if (this.currentPage === AppPage.LOADING) {
+      this.LoadingPage()
+    } else if (this.currentPage === AppPage.HOME) {
+      this.TimelinePage()
+    } else {
+      this.WizardPage()
+    }
   }
 }
