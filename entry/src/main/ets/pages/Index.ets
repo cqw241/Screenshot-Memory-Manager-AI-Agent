@@ -10,8 +10,19 @@ import {
   targetHost
 } from '../models/EndpointCatalog';
 import { VerifiedConfigMetadata } from '../models/ModelConfig';
+import {
+  VerificationCandidate,
+  VerificationConfirmations,
+  VerificationError,
+  VerificationErrorCategory,
+  VerificationSuccess
+} from '../models/VerificationModels';
+import { ConfigVerificationCoordinator } from '../services/ConfigVerificationCoordinator';
 import { ConfigRepository } from '../services/ConfigRepository';
 import { createConfigRepository } from '../services/ConfigRepositoryFactory';
+import { HarmonyHttpTransport } from '../services/HarmonyHttpTransport';
+import { parseOrigin } from '../services/UrlPreflight';
+import { VisionVerificationGate } from '../services/VisionVerificationGate';
 
 @Entry
 @Component
@@ -26,12 +37,18 @@ struct Index {
   @State private isLoading: boolean = false;
   @State private errorCategory: string = '';
   @State private errorMessage: string = '';
+  @State private verificationSucceeded: boolean = false;
 
   private repository?: ConfigRepository;
+  private coordinator?: ConfigVerificationCoordinator;
 
   aboutToAppear(): void {
     const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
     this.repository = createConfigRepository(context);
+    this.coordinator = new ConfigVerificationCoordinator(
+      new VisionVerificationGate(new HarmonyHttpTransport()),
+      this.repository
+    );
     this.loadExistingConfiguration();
   }
 
@@ -45,7 +62,9 @@ struct Index {
         this.baseURL = metadata.baseURL;
         this.model = metadata.model;
         this.hasSavedKey = true;
-        this.resetOriginConfirmations();
+        this.customSourceTrusted = !isKnownOfficialOrigin(metadata.baseURL) &&
+          metadata.trustedOrigin === parseOrigin(metadata.baseURL);
+        this.loopbackWarningAccepted = false;
       }
     } catch (_error) {
       // 损坏配置的可恢复启动说明在 Task 1.5 统一处理。
@@ -66,6 +85,7 @@ struct Index {
   private clearError(): void {
     this.errorCategory = '';
     this.errorMessage = '';
+    this.verificationSucceeded = false;
   }
 
   private isCustomSource(): boolean {
@@ -73,20 +93,65 @@ struct Index {
   }
 
   private isFormReady(): boolean {
-    const fieldsComplete: boolean = this.baseURL.trim().length > 0 &&
+    const fieldsComplete: boolean = parseOrigin(this.baseURL).length > 0 &&
       (this.apiKey.length > 0 || this.hasSavedKey) && this.model.trim().length > 0;
     const trustReady: boolean = !this.isCustomSource() || this.customSourceTrusted;
     const loopbackReady: boolean = !isLoopbackHttpOrigin(this.baseURL) || this.loopbackWarningAccepted;
     return fieldsComplete && trustReady && loopbackReady && !this.isLoading;
   }
 
-  private startVerification(): void {
-    if (!this.isFormReady()) {
+  private async startVerification(): Promise<void> {
+    if (!this.isFormReady() || this.repository === undefined || this.coordinator === undefined) {
       return;
     }
     this.clearError();
     this.isLoading = true;
-    // Task 1.4 接入视觉挑战、错误分类与事务式保存。
+    const confirmations: VerificationConfirmations = {
+      customOriginTrusted: this.customSourceTrusted,
+      loopbackHttpAccepted: this.loopbackWarningAccepted
+    };
+    try {
+      let success: VerificationSuccess;
+      if (this.apiKey.length > 0) {
+        success = await this.verifyWithKey(this.apiKey, confirmations);
+      } else {
+        success = await this.repository.withVerifiedConfig(async (stored) => {
+          return await this.verifyWithKey(stored.apiKey, confirmations);
+        });
+      }
+      this.baseURL = success.normalizedBaseURL;
+      this.apiKey = '';
+      this.hasSavedKey = true;
+      this.customSourceTrusted = !isKnownOfficialOrigin(success.normalizedBaseURL);
+      this.verificationSucceeded = true;
+    } catch (error) {
+      if (error instanceof VerificationError) {
+        this.errorCategory = error.category;
+        this.errorMessage = error.userMessage;
+      } else {
+        this.errorCategory = VerificationErrorCategory.SERVICE;
+        this.errorMessage = '视觉验证已完成，但配置未能安全保存。旧配置未受影响，请重试。';
+      }
+    } finally {
+      this.isLoading = false;
+    }
+  }
+
+  private async verifyWithKey(apiKey: string,
+    confirmations: VerificationConfirmations): Promise<VerificationSuccess> {
+    if (this.coordinator === undefined) {
+      throw new Error('Verification coordinator is unavailable');
+    }
+    const candidate: VerificationCandidate = {
+      baseURL: this.baseURL,
+      apiKey: apiKey,
+      model: this.model
+    };
+    try {
+      return await this.coordinator.verifyAndSave(candidate, confirmations);
+    } finally {
+      candidate.apiKey = '';
+    }
   }
 
   @Builder
@@ -245,6 +310,36 @@ struct Index {
     .borderRadius(16)
   }
 
+  @Builder
+  private SuccessPanel() {
+    Row({ space: 12 }) {
+      Text('✓')
+        .fontSize(16)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#FFFDF8')
+        .width(30)
+        .height(30)
+        .textAlign(TextAlign.Center)
+        .backgroundColor('#2C6A4E')
+        .borderRadius(15)
+      Column({ space: 3 }) {
+        Text('视觉验证通过')
+          .fontSize(14)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#214D3A')
+        Text('新配置已通过事务式替换安全保存。')
+          .fontSize(13)
+          .fontColor('#416D59')
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .padding(15)
+    .backgroundColor('#EAF5EE')
+    .borderRadius(16)
+  }
+
   build() {
     Scroll() {
       Column({ space: 24 }) {
@@ -321,8 +416,11 @@ struct Index {
             .backgroundColor('#F5F2EA')
             .borderRadius(13)
             .onChange((value: string) => {
+              const oldOrigin: string = parseOrigin(this.baseURL);
               this.baseURL = value;
-              this.resetOriginConfirmations();
+              if (parseOrigin(value) !== oldOrigin) {
+                this.resetOriginConfirmations();
+              }
               this.clearError();
             })
 
@@ -396,6 +494,10 @@ struct Index {
 
         if (this.errorMessage.length > 0) {
           this.ErrorPanel()
+        }
+
+        if (this.verificationSucceeded) {
+          this.SuccessPanel()
         }
 
         Button() {

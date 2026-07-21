@@ -30,6 +30,21 @@ export const CODING_ENDPOINTS: EndpointTemplate[] = [
   { label: '腾讯云 Coding Plan', baseURL: 'https://api.lkeap.cloud.tencent.com/coding/v3' }
 ];
 
+export const OFFICIAL_ORIGINS: string[] = [
+  'https://api.openai.com',
+  'https://dashscope.aliyuncs.com',
+  'https://ark.cn-beijing.volces.com',
+  'https://api.xiaomimimo.com',
+  'https://open.bigmodel.cn',
+  'https://api.moonshot.cn',
+  'https://api.hunyuan.cloud.tencent.com',
+  'https://api.minimax.io',
+  'https://coding.dashscope.aliyuncs.com',
+  'https://token-plan-cn.xiaomimimo.com',
+  'https://api.kimi.com',
+  'https://api.lkeap.cloud.tencent.com'
+];
+
 // 最近依据厂商官方模型/API 文档核对：2026-07-21。建议仅用于减少输入成本，最终能力以视觉挑战为准。
 export const RECOMMENDED_MODELS: ModelSuggestion[] = [
   { label: 'OpenAI · GPT-4.1', model: 'gpt-4.1' },
@@ -41,9 +56,7 @@ export const RECOMMENDED_MODELS: ModelSuggestion[] = [
 export function isKnownOfficialOrigin(rawURL: string): boolean {
   try {
     const candidate: url.URL = url.URL.parseURL(rawURL.trim());
-    return MULTIMODAL_ENDPOINTS.concat(CODING_ENDPOINTS).some((template: EndpointTemplate) => {
-      return url.URL.parseURL(template.baseURL).origin === candidate.origin;
-    });
+    return OFFICIAL_ORIGINS.includes(candidate.origin);
   } catch (_error) {
     return false;
   }
