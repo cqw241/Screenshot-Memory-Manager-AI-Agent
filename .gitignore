@@ -2,6 +2,7 @@
 .hvigor/
 .idea/
 **/.preview/
+**/.test/
 **/build/
 **/.cxx/
 **/node_modules/

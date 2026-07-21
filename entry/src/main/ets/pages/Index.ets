@@ -1,6 +1,16 @@
+import { common } from '@kit.AbilityKit';
+import { createConfigRepository } from '../services/ConfigRepositoryFactory';
+
 @Entry
 @Component
 struct Index {
+  aboutToAppear(): void {
+    const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
+    createConfigRepository(context).getState().catch((_error: Error) => {
+      // 启动路由与可恢复错误提示在 Task 1.5 接入。
+    });
+  }
+
   build() {
     Column({ space: 18 }) {
       Text('拾光')
@@ -24,4 +34,3 @@ struct Index {
     .backgroundColor('#F7F7FC')
   }
 }
-
