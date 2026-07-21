@@ -18,6 +18,12 @@ import {
   ReadyImportOutcome
 } from '../models/ScreenshotImportModels';
 import {
+  ParseStatus,
+  StructuredUnderstanding,
+  UnderstandingError,
+  UnderstandingOutcome
+} from '../models/StructuredUnderstandingModels';
+import {
   VerificationCandidate,
   VerificationConfirmations,
   VerificationError,
@@ -31,8 +37,14 @@ import { HarmonyHttpTransport } from '../services/HarmonyHttpTransport';
 import { HarmonyOcrSessionFactory } from '../services/HarmonyOcrSession';
 import { HarmonyPhotoSelection } from '../services/HarmonyPhotoSelection';
 import { HarmonyPrivateImageStore } from '../services/HarmonyPrivateImageStore';
+import { HarmonyThumbnailGenerator } from '../services/HarmonyThumbnailGenerator';
+import {
+  HarmonyUnderstandingClock,
+  HarmonyUnderstandingMetricsLogger
+} from '../services/HarmonyUnderstandingRuntime';
 import { ImportConsentRepository } from '../services/ImportConsentRepository';
 import { ScreenshotImportService } from '../services/ScreenshotImportService';
+import { ScreenshotUnderstandingService } from '../services/ScreenshotUnderstandingService';
 import { parseOrigin } from '../services/UrlPreflight';
 import { VisionVerificationGate } from '../services/VisionVerificationGate';
 import { StartupRouter } from '../services/StartupRouter';
@@ -60,10 +72,22 @@ struct Index {
   @State private importedImageSummary: string = '';
   @State private ocrPreview: string = '';
   @State private ocrNeedsRetry: boolean = false;
+  @State private thumbnailUri: string = '';
+  @State private thumbnailSummary: string = '';
+  @State private understandingType: string = '';
+  @State private understandingTimeText: string = '';
+  @State private understandingEventTime: string = '';
+  @State private understandingLocation: string = '';
+  @State private understandingCode: string = '';
+  @State private understandingAmount: string = '';
+  @State private understandingActions: string = '';
+  @State private understandingParseStatus: string = '';
+  @State private understandingErrorCategory: string = '';
 
   private repository?: ConfigRepository;
   private coordinator?: ConfigVerificationCoordinator;
   private importService?: ScreenshotImportService;
+  private understandingService?: ScreenshotUnderstandingService;
   private importConsent?: ImportConsentRepository;
 
   aboutToAppear(): void {
@@ -77,6 +101,13 @@ struct Index {
       new HarmonyPhotoSelection(),
       new HarmonyPrivateImageStore(context),
       new HarmonyOcrSessionFactory()
+    );
+    this.understandingService = new ScreenshotUnderstandingService(
+      this.repository,
+      new HarmonyThumbnailGenerator(context),
+      new HarmonyHttpTransport(),
+      new HarmonyUnderstandingClock(),
+      new HarmonyUnderstandingMetricsLogger()
     );
     this.importConsent = new ImportConsentRepository(context);
     this.resolveStartupRoute();
@@ -170,12 +201,13 @@ struct Index {
   }
 
   private async runScreenshotImport(): Promise<void> {
-    if (this.importService === undefined || this.isImporting) {
+    if (this.importService === undefined || this.understandingService === undefined || this.isImporting) {
       return;
     }
     this.isImporting = true;
     this.importStatus = '正在选择图片并进行端侧文字识别…';
     this.ocrNeedsRetry = false;
+    this.resetUnderstandingPreview();
     try {
       const outcome: ImportOutcome = await this.importService.importSingle();
       if (outcome.kind === ImportOutcomeKind.CANCELLED) {
@@ -188,14 +220,60 @@ struct Index {
       this.ocrPreview = ready.ocrText;
       this.ocrNeedsRetry = ready.ocrStatus === OcrStatus.RETRY_PENDING;
       this.importStatus = this.ocrNeedsRetry ?
-        '图片已安全复制；端侧 OCR 未识别到文字，已标记待重试。' :
-        '图片已安全复制，端侧 OCR 已完成。';
+        '端侧 OCR 未识别到文字，正在使用安全缩略图继续理解…' :
+        '端侧 OCR 已完成，正在生成安全缩略图并理解内容…';
+      try {
+        const understandingOutcome: UnderstandingOutcome =
+          await this.understandingService.understand(ready.image, ready.ocrText);
+        this.applyUnderstandingOutcome(understandingOutcome);
+        this.importStatus = understandingOutcome.understanding.parseStatus === ParseStatus.FALLBACK_INVALID_RESPONSE ?
+          '模型两次返回的内容均不符合契约，已安全回退为未分类结果。' :
+          '缩略图与结构化理解已完成。';
+      } catch (error) {
+        if (error instanceof UnderstandingError) {
+          this.understandingErrorCategory = error.category;
+          this.importStatus = `${error.category}：${error.userMessage}`;
+        } else {
+          this.understandingErrorCategory = '服务错误';
+          this.importStatus = '服务错误：模型理解暂时不可用，请稍后重试。';
+        }
+      }
     } catch (_error) {
       this.importStatus = '导入失败。请确认图片可读取后重试。';
       this.ocrNeedsRetry = false;
     } finally {
       this.isImporting = false;
     }
+  }
+
+  private resetUnderstandingPreview(): void {
+    this.thumbnailUri = '';
+    this.thumbnailSummary = '';
+    this.understandingType = '';
+    this.understandingTimeText = '';
+    this.understandingEventTime = '';
+    this.understandingLocation = '';
+    this.understandingCode = '';
+    this.understandingAmount = '';
+    this.understandingActions = '';
+    this.understandingParseStatus = '';
+    this.understandingErrorCategory = '';
+  }
+
+  private applyUnderstandingOutcome(outcome: UnderstandingOutcome): void {
+    const result: StructuredUnderstanding = outcome.understanding;
+    this.thumbnailUri = outcome.thumbnail.uri;
+    this.thumbnailSummary = `${outcome.thumbnail.width} × ${outcome.thumbnail.height} · ` +
+      `${outcome.thumbnail.byteCount} bytes · JPEG 85`;
+    this.understandingType = result.type;
+    this.understandingTimeText = result.entities.timeText ?? '';
+    this.understandingEventTime = result.entities.eventTime ?? '';
+    this.understandingLocation = result.entities.location ?? '';
+    this.understandingCode = result.entities.code ?? '';
+    this.understandingAmount = result.entities.amount ?? '';
+    this.understandingActions = result.actions.length > 0 ? result.actions.join(' · ') : '无';
+    this.understandingParseStatus = result.parseStatus;
+    this.understandingErrorCategory = '';
   }
 
   private resetDraft(): void {
@@ -884,7 +962,7 @@ struct Index {
                     .width(20)
                     .height(20)
                     .color('#FFFDF8')
-                  Text('正在端侧识别…')
+                  Text('正在处理截图…')
                     .fontSize(15)
                     .fontWeight(FontWeight.Bold)
                     .fontColor('#FFFDF8')
@@ -909,11 +987,11 @@ struct Index {
             if (this.importStatus.length > 0) {
               Text(this.importStatus)
                 .fontSize(12)
-                .fontColor(this.ocrNeedsRetry ? '#8A4A2B' : '#5E655F')
+                .fontColor(this.ocrNeedsRetry || this.understandingErrorCategory.length > 0 ? '#8A4A2B' : '#5E655F')
                 .lineHeight(18)
                 .width('100%')
                 .padding(12)
-                .backgroundColor(this.ocrNeedsRetry ? '#FFF1E7' : '#EEF3EF')
+                .backgroundColor(this.ocrNeedsRetry || this.understandingErrorCategory.length > 0 ? '#FFF1E7' : '#EEF3EF')
                 .borderRadius(11)
             }
           }
@@ -927,15 +1005,17 @@ struct Index {
           if (this.importedImageUri.length > 0) {
             Column({ space: 13 }) {
               Row() {
-                Text('最近一次端侧结果')
+                Text('最近一次处理结果')
                   .fontSize(17)
                   .fontWeight(FontWeight.Bold)
                   .fontColor('#292823')
                 Blank()
-                Text(this.ocrNeedsRetry ? '待重试' : 'OCR 完成')
+                Text(this.understandingType.length > 0 ? this.understandingType :
+                  (this.understandingErrorCategory.length > 0 ? this.understandingErrorCategory :
+                    (this.ocrNeedsRetry ? 'OCR 待重试' : 'OCR 完成')))
                   .fontSize(11)
                   .fontWeight(FontWeight.Bold)
-                  .fontColor(this.ocrNeedsRetry ? '#8A4A2B' : '#2C6A4E')
+                  .fontColor(this.ocrNeedsRetry || this.understandingErrorCategory.length > 0 ? '#8A4A2B' : '#2C6A4E')
               }
               .width('100%')
               Image(this.importedImageUri)
@@ -947,6 +1027,25 @@ struct Index {
               Text(this.importedImageSummary)
                 .fontSize(11)
                 .fontColor('#8A867D')
+              if (this.thumbnailUri.length > 0) {
+                Column({ space: 8 }) {
+                  Text('发送给模型的私有缩略图')
+                    .fontSize(12)
+                    .fontWeight(FontWeight.Bold)
+                    .fontColor('#5B5A53')
+                  Image(this.thumbnailUri)
+                    .width('100%')
+                    .height(150)
+                    .objectFit(ImageFit.Contain)
+                    .backgroundColor('#F2EFE7')
+                    .borderRadius(12)
+                  Text(this.thumbnailSummary)
+                    .fontSize(11)
+                    .fontColor('#8A867D')
+                }
+                .width('100%')
+                .alignItems(HorizontalAlign.Start)
+              }
               Text(this.ocrPreview.length > 0 ? this.ocrPreview : '未识别到文字。')
                 .fontSize(13)
                 .fontColor('#47453F')
@@ -957,6 +1056,48 @@ struct Index {
                 .padding(14)
                 .backgroundColor('#F6F3EC')
                 .borderRadius(12)
+              if (this.understandingType.length > 0) {
+                Column({ space: 8 }) {
+                  Row() {
+                    Text('结构化理解')
+                      .fontSize(14)
+                      .fontWeight(FontWeight.Bold)
+                      .fontColor('#2C4438')
+                    Blank()
+                    Text(this.understandingParseStatus)
+                      .fontSize(10)
+                      .fontWeight(FontWeight.Bold)
+                      .fontColor(this.understandingParseStatus === ParseStatus.PARSED ? '#2C6A4E' : '#8A4A2B')
+                  }
+                  .width('100%')
+                  Text(`类型：${this.understandingType}`)
+                    .fontSize(13)
+                    .fontColor('#47453F')
+                  Text(`截图时间表达：${this.understandingTimeText.length > 0 ? this.understandingTimeText : '—'}`)
+                    .fontSize(13)
+                    .fontColor('#47453F')
+                  Text(`事件时间：${this.understandingEventTime.length > 0 ? this.understandingEventTime : '—'}`)
+                    .fontSize(13)
+                    .fontColor('#47453F')
+                  Text(`地点：${this.understandingLocation.length > 0 ? this.understandingLocation : '—'}`)
+                    .fontSize(13)
+                    .fontColor('#47453F')
+                  Text(`码号：${this.understandingCode.length > 0 ? this.understandingCode : '—'}`)
+                    .fontSize(13)
+                    .fontColor('#47453F')
+                  Text(`金额：${this.understandingAmount.length > 0 ? this.understandingAmount : '—'}`)
+                    .fontSize(13)
+                    .fontColor('#47453F')
+                  Text(`建议动作：${this.understandingActions}`)
+                    .fontSize(13)
+                    .fontColor('#47453F')
+                }
+                .width('100%')
+                .alignItems(HorizontalAlign.Start)
+                .padding(14)
+                .backgroundColor('#EEF3EF')
+                .borderRadius(12)
+              }
             }
             .width('100%')
             .alignItems(HorizontalAlign.Start)
@@ -966,7 +1107,7 @@ struct Index {
             .borderRadius(20)
           }
 
-          Text('正式时间轴卡片将在 Task 2.3–2.5 接入；当前区域仅用于验证单图导入与端侧 OCR。')
+          Text('正式时间轴卡片将在 Task 2.3–2.5 接入；当前区域用于验证导入、端侧 OCR、缩略图与结构化理解。')
             .fontSize(11)
             .fontColor('#969187')
             .lineHeight(17)
