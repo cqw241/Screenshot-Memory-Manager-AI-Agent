@@ -1,0 +1,12 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "拾光主模块"
+    },
+    {
+      "name": "entry_ability_desc",
+      "value": "拾光应用入口"
+    }
+  ]
+}

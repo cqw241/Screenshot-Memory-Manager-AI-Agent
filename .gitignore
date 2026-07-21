@@ -1,0 +1,30 @@
+# DevEco Studio / Hvigor
+.hvigor/
+.idea/
+**/.preview/
+**/.test/
+**/build/
+**/.cxx/
+**/node_modules/
+oh_modules/
+**/oh_modules/
+local.properties
+
+# Build and signing artifacts
+*.hap
+*.app
+*.har
+*.p12
+*.jks
+*.keystore
+*.cer
+*.csr
+*.pem
+*.key
+signing-config.json5
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.log
+
