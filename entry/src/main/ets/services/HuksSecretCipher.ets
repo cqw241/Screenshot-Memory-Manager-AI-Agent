@@ -1,8 +1,10 @@
 import { util } from '@kit.ArkTS';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { cryptoFramework } from '@kit.CryptoArchitectureKit';
 import { huks } from '@kit.UniversalKeystoreKit';
 import { EncryptedSecret } from '../models/ModelConfig';
 import { SecretCipher } from './ConfigStoragePorts';
+import { isMissingHuksEntity } from './HuksErrorPolicy';
 
 const KEY_ALIAS: string = 'com.shiguang.memory.model-config.aes-gcm.v1';
 const CRYPTO_VERSION: number = 1;
@@ -75,7 +77,7 @@ export class HuksSecretCipher implements SecretCipher {
 
   private async ensureKey(): Promise<void> {
     const emptyOptions: huks.HuksOptions = { properties: [] };
-    if (await huks.isKeyItemExist(KEY_ALIAS, emptyOptions)) {
+    if (await this.keyExists(emptyOptions)) {
       return;
     }
     const options: huks.HuksOptions = {
@@ -92,9 +94,21 @@ export class HuksSecretCipher implements SecretCipher {
     try {
       await huks.generateKeyItem(KEY_ALIAS, options);
     } catch (error) {
-      if (!(await huks.isKeyItemExist(KEY_ALIAS, emptyOptions))) {
+      if (!(await this.keyExists(emptyOptions))) {
         throw error as Error;
       }
+    }
+  }
+
+  private async keyExists(options: huks.HuksOptions): Promise<boolean> {
+    try {
+      return await huks.isKeyItemExist(KEY_ALIAS, options);
+    } catch (error) {
+      const businessError: BusinessError = error as BusinessError;
+      if (isMissingHuksEntity(businessError.code)) {
+        return false;
+      }
+      throw error as Error;
     }
   }
 

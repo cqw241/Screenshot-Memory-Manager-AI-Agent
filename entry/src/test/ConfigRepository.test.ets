@@ -7,6 +7,7 @@ import {
 } from '../main/ets/models/ModelConfig';
 import { ConfigRepository } from '../main/ets/services/ConfigRepository';
 import { KeyValueStore, SecretCipher } from '../main/ets/services/ConfigStoragePorts';
+import { isMissingHuksEntity } from '../main/ets/services/HuksErrorPolicy';
 
 class FakeCipher implements SecretCipher {
   failEncrypt: boolean = false;
@@ -65,6 +66,11 @@ function config(baseURL: string, apiKey: string, model: string): RuntimeModelCon
 
 export default function configRepositoryTest() {
   describe('ConfigRepository', () => {
+    it('recognizes the HUKS missing-key error used during first setup', 0, () => {
+      expect(isMissingHuksEntity(12000011)).assertTrue();
+      expect(isMissingHuksEntity(12000012)).assertFalse();
+    });
+
     it('reports unconfigured before first commit', 0, async () => {
       const repository: ConfigRepository = new ConfigRepository(new FakeStore(), new FakeCipher());
       expect(await repository.getState()).assertEqual(ConfigState.UNCONFIGURED);
