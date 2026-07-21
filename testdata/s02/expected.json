@@ -1,0 +1,18 @@
+{
+  "poster.png": {
+    "type": "POSTER",
+    "requiredOcrText": ["人工智能前沿讲座", "2026年7月25日 14:00", "图书馆报告厅"]
+  },
+  "pickup-code.png": {
+    "type": "PICKUP_CODE",
+    "requiredOcrText": ["取件码", "A8B6", "南门快递站"]
+  },
+  "ddl-notice.png": {
+    "type": "DDL_NOTICE",
+    "requiredOcrText": ["数据库课程设计", "2026年7月28日 23:59", "教学平台"]
+  },
+  "coupon.png": {
+    "type": "COUPON",
+    "requiredOcrText": ["满30减10元", "2026年7月31日 23:59", "学生活动中心一层"]
+  }
+}

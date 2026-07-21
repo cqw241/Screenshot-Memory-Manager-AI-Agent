@@ -12,6 +12,12 @@ import {
 import { AppPage, StartupRoute } from '../models/AppFlow';
 import { VerifiedConfigMetadata } from '../models/ModelConfig';
 import {
+  ImportOutcome,
+  ImportOutcomeKind,
+  OcrStatus,
+  ReadyImportOutcome
+} from '../models/ScreenshotImportModels';
+import {
   VerificationCandidate,
   VerificationConfirmations,
   VerificationError,
@@ -22,6 +28,11 @@ import { ConfigVerificationCoordinator } from '../services/ConfigVerificationCoo
 import { ConfigRepository } from '../services/ConfigRepository';
 import { createConfigRepository } from '../services/ConfigRepositoryFactory';
 import { HarmonyHttpTransport } from '../services/HarmonyHttpTransport';
+import { HarmonyOcrSessionFactory } from '../services/HarmonyOcrSession';
+import { HarmonyPhotoSelection } from '../services/HarmonyPhotoSelection';
+import { HarmonyPrivateImageStore } from '../services/HarmonyPrivateImageStore';
+import { ImportConsentRepository } from '../services/ImportConsentRepository';
+import { ScreenshotImportService } from '../services/ScreenshotImportService';
 import { parseOrigin } from '../services/UrlPreflight';
 import { VisionVerificationGate } from '../services/VisionVerificationGate';
 import { StartupRouter } from '../services/StartupRouter';
@@ -43,9 +54,17 @@ struct Index {
   @State private errorMessage: string = '';
   @State private verificationSucceeded: boolean = false;
   @State private activeModel: string = '';
+  @State private isImporting: boolean = false;
+  @State private importStatus: string = '';
+  @State private importedImageUri: string = '';
+  @State private importedImageSummary: string = '';
+  @State private ocrPreview: string = '';
+  @State private ocrNeedsRetry: boolean = false;
 
   private repository?: ConfigRepository;
   private coordinator?: ConfigVerificationCoordinator;
+  private importService?: ScreenshotImportService;
+  private importConsent?: ImportConsentRepository;
 
   aboutToAppear(): void {
     const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
@@ -54,6 +73,12 @@ struct Index {
       new VisionVerificationGate(new HarmonyHttpTransport()),
       this.repository
     );
+    this.importService = new ScreenshotImportService(
+      new HarmonyPhotoSelection(),
+      new HarmonyPrivateImageStore(context),
+      new HarmonyOcrSessionFactory()
+    );
+    this.importConsent = new ImportConsentRepository(context);
     this.resolveStartupRoute();
   }
 
@@ -89,6 +114,87 @@ struct Index {
       this.recoveryRequired = true;
       this.resetDraft();
       this.currentPage = AppPage.WIZARD;
+    }
+  }
+
+  private async requestScreenshotImport(): Promise<void> {
+    if (this.isImporting || this.repository === undefined || this.importConsent === undefined) {
+      return;
+    }
+    try {
+      const metadata: VerifiedConfigMetadata | undefined = await this.repository.getMetadata();
+      if (metadata === undefined) {
+        this.importStatus = '已验证配置不可用，请先重新配置模型。';
+        return;
+      }
+      if (await this.importConsent.hasConsent(metadata.trustedOrigin)) {
+        await this.runScreenshotImport();
+        return;
+      }
+      this.showImportConsent(metadata.trustedOrigin, targetHost(metadata.baseURL));
+    } catch (_error) {
+      this.importStatus = '无法读取导入授权状态，请稍后重试。';
+    }
+  }
+
+  private showImportConsent(origin: string, host: string): void {
+    this.getUIContext().showAlertDialog({
+      title: '发送截图前确认',
+      message: `拾光会先在设备端识别文字，再把 OCR 文本和长边不超过 1024px 的缩略图发送到 ${host}。原图不会上传。是否继续？`,
+      primaryButton: {
+        value: '同意并选择图片',
+        fontColor: '#2C4438',
+        action: () => {
+          this.grantConsentAndImport(origin);
+        }
+      },
+      secondaryButton: {
+        value: '取消',
+        fontColor: '#77736A',
+        action: () => {
+        }
+      }
+    });
+  }
+
+  private async grantConsentAndImport(origin: string): Promise<void> {
+    if (this.importConsent === undefined) {
+      return;
+    }
+    try {
+      await this.importConsent.grant(origin);
+      await this.runScreenshotImport();
+    } catch (_error) {
+      this.importStatus = '未能保存发送确认，请稍后重试。';
+    }
+  }
+
+  private async runScreenshotImport(): Promise<void> {
+    if (this.importService === undefined || this.isImporting) {
+      return;
+    }
+    this.isImporting = true;
+    this.importStatus = '正在选择图片并进行端侧文字识别…';
+    this.ocrNeedsRetry = false;
+    try {
+      const outcome: ImportOutcome = await this.importService.importSingle();
+      if (outcome.kind === ImportOutcomeKind.CANCELLED) {
+        this.importStatus = '已取消选择，没有导入任何图片。';
+        return;
+      }
+      const ready: ReadyImportOutcome = outcome as ReadyImportOutcome;
+      this.importedImageUri = ready.image.uri;
+      this.importedImageSummary = `${ready.image.width} × ${ready.image.height} · ${ready.image.byteCount} bytes`;
+      this.ocrPreview = ready.ocrText;
+      this.ocrNeedsRetry = ready.ocrStatus === OcrStatus.RETRY_PENDING;
+      this.importStatus = this.ocrNeedsRetry ?
+        '图片已安全复制；端侧 OCR 未识别到文字，已标记待重试。' :
+        '图片已安全复制，端侧 OCR 已完成。';
+    } catch (_error) {
+      this.importStatus = '导入失败。请确认图片可读取后重试。';
+      this.ocrNeedsRetry = false;
+    } finally {
+      this.isImporting = false;
     }
   }
 
@@ -712,77 +818,168 @@ struct Index {
   @Builder
   private TimelinePage() {
     Column() {
-      Column({ space: 28 }) {
-        Row() {
-          Column({ space: 4 }) {
-            Text('拾光 · TIMELINE')
-              .fontSize(11)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#A65B24')
-              .letterSpacing(1.4)
-            Text('你的时间轴')
-              .fontSize(30)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#20201D')
-          }
-          .layoutWeight(1)
-          .alignItems(HorizontalAlign.Start)
-          Button('模型设置  ···')
-            .fontSize(13)
-            .fontColor('#FFFDF8')
-            .backgroundColor('#2C4438')
-            .borderRadius(14)
-            .height(42)
-            .onClick(() => this.openSettings())
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
-
+      Scroll() {
         Column({ space: 20 }) {
-          Stack({ alignContent: Alignment.Center }) {
-            Circle()
-              .width(104)
-              .height(104)
-              .fill('#EEE8DB')
-            Circle()
-              .width(66)
-              .height(66)
-              .fill('#FFFDF8')
-              .stroke('#D8CEBB')
-              .strokeWidth(1)
-            Text('＋')
-              .fontSize(30)
-              .fontColor('#A65B24')
+          Row() {
+            Column({ space: 4 }) {
+              Text('拾光 · TIMELINE')
+                .fontSize(11)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#A65B24')
+                .letterSpacing(1.4)
+              Text('你的时间轴')
+                .fontSize(30)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#20201D')
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+            Button('模型设置  ···')
+              .fontSize(13)
+              .fontColor('#FFFDF8')
+              .backgroundColor('#2C4438')
+              .borderRadius(14)
+              .height(42)
+              .onClick(() => this.openSettings())
           }
-          Column({ space: 8 }) {
-            Text('第一段记忆，等待抵达')
-              .fontSize(21)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#292823')
-            Text('模型连接已经就绪。后续 Story 会在这里加入截图导入、理解结果和可回望的时间卡片。')
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
+
+          Column({ space: 14 }) {
+            Row() {
+              Column({ space: 5 }) {
+                Text('MANUAL INGEST · 02')
+                  .fontSize(11)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor('#A65B24')
+                  .letterSpacing(1.1)
+                Text('导入一张截图')
+                  .fontSize(22)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor('#292823')
+              }
+              .layoutWeight(1)
+              .alignItems(HorizontalAlign.Start)
+              if (this.activeModel.length > 0) {
+                Text(this.activeModel)
+                  .fontSize(10)
+                  .fontColor('#5C655E')
+                  .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+                  .backgroundColor('#E8EFE9')
+                  .borderRadius(9)
+              }
+            }
+            .width('100%')
+
+            Text('先在设备端识别文字。首次发送到当前模型服务前，拾光会说明数据范围并征求确认。')
               .fontSize(13)
               .fontColor('#77736A')
               .lineHeight(20)
-              .textAlign(TextAlign.Center)
-              .width('82%')
+              .width('100%')
+
+            Button() {
+              Row({ space: 10 }) {
+                if (this.isImporting) {
+                  LoadingProgress()
+                    .width(20)
+                    .height(20)
+                    .color('#FFFDF8')
+                  Text('正在端侧识别…')
+                    .fontSize(15)
+                    .fontWeight(FontWeight.Bold)
+                    .fontColor('#FFFDF8')
+                } else {
+                  Text('＋')
+                    .fontSize(19)
+                    .fontColor('#E7C391')
+                  Text('从相册选择截图')
+                    .fontSize(15)
+                    .fontWeight(FontWeight.Bold)
+                    .fontColor('#FFFDF8')
+                }
+              }
+            }
+            .width('100%')
+            .height(52)
+            .enabled(!this.isImporting)
+            .backgroundColor(this.isImporting ? '#8F9A93' : '#2C4438')
+            .borderRadius(15)
+            .onClick(() => this.requestScreenshotImport())
+
+            if (this.importStatus.length > 0) {
+              Text(this.importStatus)
+                .fontSize(12)
+                .fontColor(this.ocrNeedsRetry ? '#8A4A2B' : '#5E655F')
+                .lineHeight(18)
+                .width('100%')
+                .padding(12)
+                .backgroundColor(this.ocrNeedsRetry ? '#FFF1E7' : '#EEF3EF')
+                .borderRadius(11)
+            }
           }
-          .alignItems(HorizontalAlign.Center)
-          if (this.activeModel.length > 0) {
-            Text(`当前模型 · ${this.activeModel}`)
-              .fontSize(11)
-              .fontColor('#5C655E')
-              .padding({ left: 12, right: 12, top: 7, bottom: 7 })
-              .backgroundColor('#E8EFE9')
-              .borderRadius(10)
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding(18)
+          .backgroundColor('#FFFDF8')
+          .border({ width: 1, color: '#E8E2D5' })
+          .borderRadius(20)
+
+          if (this.importedImageUri.length > 0) {
+            Column({ space: 13 }) {
+              Row() {
+                Text('最近一次端侧结果')
+                  .fontSize(17)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor('#292823')
+                Blank()
+                Text(this.ocrNeedsRetry ? '待重试' : 'OCR 完成')
+                  .fontSize(11)
+                  .fontWeight(FontWeight.Bold)
+                  .fontColor(this.ocrNeedsRetry ? '#8A4A2B' : '#2C6A4E')
+              }
+              .width('100%')
+              Image(this.importedImageUri)
+                .width('100%')
+                .height(190)
+                .objectFit(ImageFit.Contain)
+                .backgroundColor('#F2EFE7')
+                .borderRadius(14)
+              Text(this.importedImageSummary)
+                .fontSize(11)
+                .fontColor('#8A867D')
+              Text(this.ocrPreview.length > 0 ? this.ocrPreview : '未识别到文字。')
+                .fontSize(13)
+                .fontColor('#47453F')
+                .lineHeight(20)
+                .maxLines(12)
+                .textOverflow({ overflow: TextOverflow.Ellipsis })
+                .width('100%')
+                .padding(14)
+                .backgroundColor('#F6F3EC')
+                .borderRadius(12)
+            }
+            .width('100%')
+            .alignItems(HorizontalAlign.Start)
+            .padding(18)
+            .backgroundColor('#FFFDF8')
+            .border({ width: 1, color: '#E8E2D5' })
+            .borderRadius(20)
           }
+
+          Text('正式时间轴卡片将在 Task 2.3–2.5 接入；当前区域仅用于验证单图导入与端侧 OCR。')
+            .fontSize(11)
+            .fontColor('#969187')
+            .lineHeight(17)
+            .textAlign(TextAlign.Center)
+            .width('100%')
+            .padding({ bottom: 18 })
         }
-        .layoutWeight(1)
         .width('100%')
-        .justifyContent(FlexAlign.Center)
+        .padding({ left: 20, right: 20, top: 30 })
       }
       .layoutWeight(1)
       .width('100%')
-      .padding({ left: 20, right: 20, top: 30 })
+      .scrollBar(BarState.Off)
 
       Row() {
         Column({ space: 5 }) {
