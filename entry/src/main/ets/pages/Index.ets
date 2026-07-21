@@ -12,6 +12,12 @@ import {
 import { AppPage, StartupRoute } from '../models/AppFlow';
 import { VerifiedConfigMetadata } from '../models/ModelConfig';
 import {
+  CardStorageError,
+  CardStorageErrorCategory,
+  ScreenshotCard,
+  ScreenshotCardRepositoryPort
+} from '../models/ScreenshotCardModels';
+import {
   ImportOutcome,
   ImportOutcomeKind,
   OcrStatus,
@@ -44,6 +50,7 @@ import {
 } from '../services/HarmonyUnderstandingRuntime';
 import { ImportConsentRepository } from '../services/ImportConsentRepository';
 import { ScreenshotImportService } from '../services/ScreenshotImportService';
+import { createScreenshotCardRepository } from '../services/ScreenshotCardRepositoryFactory';
 import { ScreenshotUnderstandingService } from '../services/ScreenshotUnderstandingService';
 import { parseOrigin } from '../services/UrlPreflight';
 import { VisionVerificationGate } from '../services/VisionVerificationGate';
@@ -83,12 +90,15 @@ struct Index {
   @State private understandingActions: string = '';
   @State private understandingParseStatus: string = '';
   @State private understandingErrorCategory: string = '';
+  @State private cardStorageSummary: string = '正在读取本地卡片…';
+  @State private cardStorageErrorCategory: string = '';
 
   private repository?: ConfigRepository;
   private coordinator?: ConfigVerificationCoordinator;
   private importService?: ScreenshotImportService;
   private understandingService?: ScreenshotUnderstandingService;
   private importConsent?: ImportConsentRepository;
+  private cardRepository?: ScreenshotCardRepositoryPort;
 
   aboutToAppear(): void {
     const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
@@ -110,6 +120,7 @@ struct Index {
       new HarmonyUnderstandingMetricsLogger()
     );
     this.importConsent = new ImportConsentRepository(context);
+    this.cardRepository = createScreenshotCardRepository(context);
     this.resolveStartupRoute();
   }
 
@@ -136,6 +147,7 @@ struct Index {
       if (metadata !== undefined) {
         this.activeModel = metadata.model;
         this.currentPage = AppPage.HOME;
+        await this.loadCardStorageSummary();
       } else {
         this.recoveryRequired = true;
         this.resetDraft();
@@ -145,6 +157,31 @@ struct Index {
       this.recoveryRequired = true;
       this.resetDraft();
       this.currentPage = AppPage.WIZARD;
+    }
+  }
+
+  private async loadCardStorageSummary(savedCardId: string = ''): Promise<void> {
+    if (this.cardRepository === undefined) {
+      return;
+    }
+    try {
+      const cards: ScreenshotCard[] = await this.cardRepository.listTimeline();
+      if (cards.length === 0) {
+        this.cardStorageSummary = '本地尚无卡片。';
+      } else {
+        let latest: ScreenshotCard = cards[0];
+        for (const card of cards) {
+          if (card.createdAt > latest.createdAt ||
+            (card.createdAt === latest.createdAt && card.id > latest.id)) {
+            latest = card;
+          }
+        }
+        const latestId: string = savedCardId.length > 0 ? savedCardId : latest.id;
+        this.cardStorageSummary = `本地已有 ${cards.length} 张卡片 · 最近保存 ${latestId}`;
+      }
+      this.cardStorageErrorCategory = '';
+    } catch (error) {
+      this.applyCardStorageError(error as Object);
     }
   }
 
@@ -226,9 +263,27 @@ struct Index {
         const understandingOutcome: UnderstandingOutcome =
           await this.understandingService.understand(ready.image, ready.ocrText);
         this.applyUnderstandingOutcome(understandingOutcome);
-        this.importStatus = understandingOutcome.understanding.parseStatus === ParseStatus.FALLBACK_INVALID_RESPONSE ?
-          '模型两次返回的内容均不符合契约，已安全回退为未分类结果。' :
-          '缩略图与结构化理解已完成。';
+        const understandingMessage: string =
+          understandingOutcome.understanding.parseStatus === ParseStatus.FALLBACK_INVALID_RESPONSE ?
+            '模型两次返回的内容均不符合契约，已安全回退为未分类结果。' :
+            '缩略图与结构化理解已完成。';
+        if (this.cardRepository === undefined) {
+          this.applyCardStorageError(new CardStorageError(CardStorageErrorCategory.OPEN,
+            '本地卡片存储暂时不可用，请稍后重试。'));
+          this.importStatus = `${understandingMessage} 卡片未能保存。`;
+        } else {
+          try {
+            const saved: ScreenshotCard = await this.cardRepository.create({
+              image: ready.image,
+              outcome: understandingOutcome
+            });
+            await this.loadCardStorageSummary(saved.id);
+            this.importStatus = `${understandingMessage} 卡片已保存。`;
+          } catch (storageError) {
+            this.applyCardStorageError(storageError as Object);
+            this.importStatus = `${understandingMessage} 卡片未能保存。`;
+          }
+        }
       } catch (error) {
         if (error instanceof UnderstandingError) {
           this.understandingErrorCategory = error.category;
@@ -244,6 +299,16 @@ struct Index {
     } finally {
       this.isImporting = false;
     }
+  }
+
+  private applyCardStorageError(error: Object): void {
+    if (error instanceof CardStorageError) {
+      this.cardStorageErrorCategory = error.category;
+      this.cardStorageSummary = `${error.category}：${error.userMessage}`;
+      return;
+    }
+    this.cardStorageErrorCategory = CardStorageErrorCategory.READ;
+    this.cardStorageSummary = '卡片读取失败：暂时无法读取本地卡片。';
   }
 
   private resetUnderstandingPreview(): void {
@@ -987,11 +1052,13 @@ struct Index {
             if (this.importStatus.length > 0) {
               Text(this.importStatus)
                 .fontSize(12)
-                .fontColor(this.ocrNeedsRetry || this.understandingErrorCategory.length > 0 ? '#8A4A2B' : '#5E655F')
+                .fontColor(this.ocrNeedsRetry || this.understandingErrorCategory.length > 0 ||
+                  this.cardStorageErrorCategory.length > 0 ? '#8A4A2B' : '#5E655F')
                 .lineHeight(18)
                 .width('100%')
                 .padding(12)
-                .backgroundColor(this.ocrNeedsRetry || this.understandingErrorCategory.length > 0 ? '#FFF1E7' : '#EEF3EF')
+                .backgroundColor(this.ocrNeedsRetry || this.understandingErrorCategory.length > 0 ||
+                  this.cardStorageErrorCategory.length > 0 ? '#FFF1E7' : '#EEF3EF')
                 .borderRadius(11)
             }
           }
@@ -1001,6 +1068,31 @@ struct Index {
           .backgroundColor('#FFFDF8')
           .border({ width: 1, color: '#E8E2D5' })
           .borderRadius(20)
+
+          Column({ space: 8 }) {
+            Row() {
+              Text('本地卡片存储')
+                .fontSize(15)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#292823')
+              Blank()
+              Text(this.cardStorageErrorCategory.length > 0 ? this.cardStorageErrorCategory : 'RELATIONALSTORE')
+                .fontSize(10)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(this.cardStorageErrorCategory.length > 0 ? '#8A4A2B' : '#2C6A4E')
+            }
+            .width('100%')
+            Text(this.cardStorageSummary)
+              .fontSize(12)
+              .fontColor(this.cardStorageErrorCategory.length > 0 ? '#8A4A2B' : '#5E655F')
+              .lineHeight(18)
+              .width('100%')
+          }
+          .width('100%')
+          .alignItems(HorizontalAlign.Start)
+          .padding(14)
+          .backgroundColor(this.cardStorageErrorCategory.length > 0 ? '#FFF1E7' : '#EEF3EF')
+          .borderRadius(14)
 
           if (this.importedImageUri.length > 0) {
             Column({ space: 13 }) {
@@ -1107,7 +1199,7 @@ struct Index {
             .borderRadius(20)
           }
 
-          Text('正式时间轴卡片将在 Task 2.3–2.5 接入；当前区域用于验证导入、端侧 OCR、缩略图与结构化理解。')
+          Text('卡片现已持久化到本地；正式时间轴与详情将在 Task 2.4 接入。')
             .fontSize(11)
             .fontColor('#969187')
             .lineHeight(17)
