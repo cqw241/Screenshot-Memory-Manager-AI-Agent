@@ -1,14 +1,14 @@
 # 拾光
 
-拾光是一款 HarmonyOS NEXT 截图记忆管家 Agent。当前分支已完成 Story 2 的 Task 2.1–2.4：用户可手动导入截图，经过端侧 OCR、多模态结构化理解和本地持久化后在时间轴查看卡片，并进入详情页确认删除。
+拾光是一款 HarmonyOS NEXT 截图记忆管家 Agent。当前分支已完成 Story 2 的 Task 2.1–2.5 代码与模拟器联调：用户可手动导入截图，经过端侧 OCR、多模态结构化理解和本地持久化后在时间轴查看卡片，并进入详情页确认删除。
 
-下一步是 Task 2.5 端到端联调；静默截图监听、提醒、自然语言召回和元服务卡片仍属于后续 Story。
+当前四类确定性样例均可在模拟器 4 秒内出卡并在重启后保留；Core Vision 真机 OCR 仍待补验，完成后才能收尾 Story 2。静默截图监听、提醒、自然语言召回和元服务卡片仍属于后续 Story。
 
 ## 当前接手基线
 
 - 开发分支：`feature/s02-tracer-pipeline`。
 - 进度与已知限制：`docs/worklogs/S02-工作记录.md`。
-- Task 2.5 的验收口径：`docs/DevelopmentPlan.md`。
+- Task 2.5 的结果与剩余真机门禁：`docs/worklogs/S02-工作记录.md`。
 - Task 2.4 时间轴设计：`docs/superpowers/specs/2026-07-21-task-2-4-timeline-ui-design.md`。
 
 ## 开发环境

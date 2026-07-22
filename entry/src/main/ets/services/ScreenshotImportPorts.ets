@@ -16,3 +16,7 @@ export interface OcrSession {
 export interface OcrSessionFactory {
   open(imageUri: string): Promise<OcrSession>;
 }
+
+export interface ScreenshotImportLifecycleObserver {
+  onSelectionConfirmed(): void;
+}

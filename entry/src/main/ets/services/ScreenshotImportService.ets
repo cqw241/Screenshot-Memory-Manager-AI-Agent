@@ -8,10 +8,12 @@ import {
   OcrSession,
   OcrSessionFactory,
   PhotoSelectionPort,
-  PrivateImageStorePort
+  PrivateImageStorePort,
+  ScreenshotImportLifecycleObserver
 } from './ScreenshotImportPorts';
+import { ScreenshotImporter } from './ScreenshotIngestionPorts';
 
-export class ScreenshotImportService {
+export class ScreenshotImportService implements ScreenshotImporter {
   private readonly picker: PhotoSelectionPort;
   private readonly imageStore: PrivateImageStorePort;
   private readonly ocrFactory: OcrSessionFactory;
@@ -22,11 +24,12 @@ export class ScreenshotImportService {
     this.ocrFactory = ocrFactory;
   }
 
-  async importSingle(): Promise<ImportOutcome> {
+  async importSingle(observer?: ScreenshotImportLifecycleObserver): Promise<ImportOutcome> {
     const selectedUri: string | undefined = await this.picker.selectSingleImage();
     if (selectedUri === undefined || selectedUri.length === 0) {
       return { kind: ImportOutcomeKind.CANCELLED };
     }
+    observer?.onSelectionConfirmed();
 
     const privateImage: PrivateImageDescriptor = await this.imageStore.importImage(selectedUri);
     const session: OcrSession = await this.ocrFactory.open(privateImage.uri);

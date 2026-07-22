@@ -13,6 +13,7 @@ import {
   SuggestedAction
 } from '../models/StructuredUnderstandingModels';
 import { isIso8601WithTimezone } from './StructuredResponseParser';
+import { ScreenshotCardWriter } from './ScreenshotIngestionPorts';
 
 export interface CardRow {
   id: string;
@@ -70,7 +71,7 @@ const ACTIONS: string[] = [
 const PARSE_STATUSES: string[] = [ParseStatus.PARSED, ParseStatus.FALLBACK_INVALID_RESPONSE];
 const ENTITY_KEYS: string[] = ['amount', 'code', 'eventTime', 'location', 'timeText'];
 
-export class ScreenshotCardRepository implements ScreenshotCardRepositoryPort {
+export class ScreenshotCardRepository implements ScreenshotCardRepositoryPort, ScreenshotCardWriter {
   private readonly rows: CardRowStore;
   private readonly clock: CardClock;
 

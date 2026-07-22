@@ -317,6 +317,49 @@ export default function screenshotUnderstandingTest() {
       expect(isIso8601WithTimezone('2026-07-25T14:00:00+15:00')).assertFalse();
     });
 
+    it('rejects an event time when the source text omits the year', 0, () => {
+      assertInvalid('{"type":"PICKUP_CODE","entities":{"timeText":"7月23日前","eventTime":' +
+        '"2026-07-23T23:59:00-07:00","location":"南门快递站","code":"A8B6","amount":null},' +
+        '"actions":["COPY_CODE"]}');
+    });
+
+    it('rejects an event time when the source text omits the clock time', 0, () => {
+      assertInvalid('{"type":"POSTER","entities":{"timeText":"2026年7月25日","eventTime":' +
+        '"2026-07-25T14:00:00+08:00","location":"图书馆报告厅","code":null,"amount":null},' +
+        '"actions":["REMIND"]}');
+    });
+
+    it('rejects an event time when the source text omits the calendar day', 0, () => {
+      assertInvalid('{"type":"POSTER","entities":{"timeText":"2026年7月 14:00","eventTime":' +
+        '"2026-07-25T14:00:00+08:00","location":null,"code":null,"amount":null},"actions":[]}');
+    });
+
+    it('rejects event times that conflict with their source components or invent seconds', 0, () => {
+      assertInvalid('{"type":"POSTER","entities":{"timeText":"2026年7月25日 14:00","eventTime":' +
+        '"2026-07-26T14:00:00+08:00","location":null,"code":null,"amount":null},"actions":[]}');
+      assertInvalid('{"type":"POSTER","entities":{"timeText":"2026年7月25日 14:00","eventTime":' +
+        '"2026-07-25T14:00:30+08:00","location":null,"code":null,"amount":null},"actions":[]}');
+    });
+
+    it('accepts complete numeric source dates and nullable normalized times', 0, () => {
+      const numeric: StructuredUnderstanding = parseStructuredContent(
+        '{"type":"DDL_NOTICE","entities":{"timeText":"截止：2026/7/28 23:59","eventTime":' +
+        '"2026-07-28T23:59:00-07:00","location":null,"code":null,"amount":null},"actions":[]}'
+      );
+      const nullable: StructuredUnderstanding = parseStructuredContent(
+        '{"type":"DDL_NOTICE","entities":{"timeText":"2026年7月28日 23:59","eventTime":null,' +
+        '"location":null,"code":null,"amount":null},"actions":[]}'
+      );
+      const hyphenated: StructuredUnderstanding = parseStructuredContent(
+        '{"type":"POSTER","entities":{"timeText":"2026-7-25 14:00","eventTime":' +
+        '"2026-07-25T14:00:00+08:00","location":null,"code":null,"amount":null},"actions":[]}'
+      );
+
+      expect(numeric.entities.eventTime).assertEqual('2026-07-28T23:59:00-07:00');
+      expect(nullable.entities.eventTime === null).assertTrue();
+      expect(hyphenated.entities.eventTime).assertEqual('2026-07-25T14:00:00+08:00');
+    });
+
     it('retries invalid content once using the same inputs without echoing the raw response', 0, async () => {
       const firstRaw: string = 'INVALID_PRIVATE_FIRST_RESPONSE';
       const transport: FakeTransport = new FakeTransport();
@@ -406,6 +449,7 @@ export default function screenshotUnderstandingTest() {
       }, true);
 
       expect(body.includes('上一次输出未通过客户端校验')).assertTrue();
+      expect(body.includes('eventTime 非空时，timeText 必须明确包含年、月、日、时、分')).assertTrue();
       expect(body.includes('response_format')).assertFalse();
       expect(body.includes('"temperature":0')).assertTrue();
       expect(body.includes('"max_tokens":500')).assertTrue();

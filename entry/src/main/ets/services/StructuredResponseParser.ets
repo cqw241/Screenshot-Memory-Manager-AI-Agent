@@ -58,7 +58,9 @@ export function parseStructuredContent(raw: string): StructuredUnderstanding {
   if (!isNullableString(entities.timeText) || !isNullableString(entities.eventTime) ||
     !isNullableString(entities.location) || !isNullableString(entities.code) ||
     !isNullableString(entities.amount) ||
-    (entities.eventTime !== null && !isIso8601WithTimezone(entities.eventTime as string))) {
+    (entities.eventTime !== null && (!isIso8601WithTimezone(entities.eventTime as string) ||
+      entities.timeText === null || !matchesEventTimeEvidence(entities.timeText as string,
+        entities.eventTime as string)))) {
     throw new InvalidStructuredContentError();
   }
 
@@ -126,6 +128,41 @@ export function isIso8601WithTimezone(value: string): boolean {
     }
   }
   return true;
+}
+
+function matchesEventTimeEvidence(timeText: string, eventTime: string): boolean {
+  const chinese: RegExpExecArray | null =
+    /(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日[^\d]*(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(timeText);
+  const numeric: RegExpExecArray | null =
+    /(\d{4})\s*([-\/.])\s*(\d{1,2})\s*\2\s*(\d{1,2})[^\d]*(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(timeText);
+  const source: RegExpExecArray | null = chinese ?? numeric;
+  if (source === null) {
+    return false;
+  }
+
+  const event: RegExpExecArray | null =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?/.exec(eventTime);
+  if (event === null) {
+    return false;
+  }
+
+  const sourceValues: number[] = chinese !== null ? [
+    Number.parseInt(source[1], 10), Number.parseInt(source[2], 10), Number.parseInt(source[3], 10),
+    Number.parseInt(source[4], 10), Number.parseInt(source[5], 10)
+  ] : [
+    Number.parseInt(source[1], 10), Number.parseInt(source[3], 10), Number.parseInt(source[4], 10),
+    Number.parseInt(source[5], 10), Number.parseInt(source[6], 10)
+  ];
+  for (let index: number = 0; index < sourceValues.length; index += 1) {
+    if (sourceValues[index] !== Number.parseInt(event[index + 1], 10)) {
+      return false;
+    }
+  }
+
+  const sourceSecondText: string | undefined = chinese !== null ? source[6] : source[7];
+  const sourceSecond: number = sourceSecondText === undefined ? 0 : Number.parseInt(sourceSecondText, 10);
+  const eventSecond: number = event[6] === undefined ? 0 : Number.parseInt(event[6], 10);
+  return sourceSecond === eventSecond;
 }
 
 function hasExactKeys(value: Object, expected: string[]): boolean {

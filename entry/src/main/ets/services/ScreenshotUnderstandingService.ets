@@ -14,6 +14,7 @@ import {
 } from '../models/VerificationModels';
 import { VerifiedConfigAccess } from './ConfigStoragePorts';
 import { shouldDisableThinking } from './ChatRequestCompatibility';
+import { ScreenshotUnderstander } from './ScreenshotIngestionPorts';
 import {
   InvalidStructuredContentError,
   fallbackInvalidResponse,
@@ -75,7 +76,7 @@ interface CompletionResponse {
 const REQUEST_TIMEOUT_MS: number = 15000;
 const MAX_TOKENS: number = 500;
 
-export class ScreenshotUnderstandingService {
+export class ScreenshotUnderstandingService implements ScreenshotUnderstander {
   private readonly config: VerifiedConfigAccess;
   private readonly thumbnails: ThumbnailGenerator;
   private readonly transport: HttpTransport;
@@ -265,8 +266,9 @@ export function buildUnderstandingRequestBody(model: string, ocrText: string, th
     '"entities":{"timeText":"string | null","eventTime":"ISO-8601 with timezone | null",' +
     '"location":"string | null","code":"string | null","amount":"string | null"},' +
     '"actions":["REMIND | NAVIGATE | COPY_CODE | ADD_CALENDAR"]}。' +
-    'timeText 必须保留截图原表达。只有日期、时间和时区信息都足够可靠时才填写 eventTime；' +
-    '不得猜测缺失的年、月、日或时间，否则填 null。没有值的实体必须填 null。\n' +
+    'timeText 必须保留截图原表达。eventTime 非空时，timeText 必须明确包含年、月、日、时、分，' +
+    '且各组件必须一致；原文没有秒时只能省略秒或使用 00 秒。不得猜测缺失的日期或时间组件，' +
+    '否则 eventTime 填 null。设备时区可用于生成时区偏移。没有值的实体必须填 null。\n' +
     `OCR_TEXT_BEGIN\n${ocrText}\nOCR_TEXT_END`;
   const textPart: ChatContentPart = { type: 'text', text: prompt };
   const imagePart: ChatContentPart = {

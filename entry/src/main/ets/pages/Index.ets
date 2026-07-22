@@ -24,15 +24,10 @@ import {
   ScreenshotCardRepositoryPort
 } from '../models/ScreenshotCardModels';
 import {
-  ImportOutcome,
-  ImportOutcomeKind,
-  OcrStatus,
-  ReadyImportOutcome
+  OcrStatus
 } from '../models/ScreenshotImportModels';
 import {
-  ParseStatus,
-  UnderstandingError,
-  UnderstandingOutcome
+  ParseStatus
 } from '../models/StructuredUnderstandingModels';
 import {
   VerificationCandidate,
@@ -55,6 +50,15 @@ import {
 } from '../services/HarmonyUnderstandingRuntime';
 import { ImportConsentRepository } from '../services/ImportConsentRepository';
 import { ScreenshotImportService } from '../services/ScreenshotImportService';
+import {
+  FailedIngestionResult,
+  IngestionObserver,
+  IngestionResult,
+  IngestionResultKind,
+  IngestionStage,
+  SavedIngestionResult,
+  ScreenshotIngestionCoordinator
+} from '../services/ScreenshotIngestionCoordinator';
 import { createScreenshotCardRepository } from '../services/ScreenshotCardRepositoryFactory';
 import { ScreenshotUnderstandingService } from '../services/ScreenshotUnderstandingService';
 import { parseOrigin } from '../services/UrlPreflight';
@@ -65,6 +69,22 @@ enum HomeNoticeTone {
   NEUTRAL = 'NEUTRAL',
   SUCCESS = 'SUCCESS',
   WARNING = 'WARNING'
+}
+
+function formatSeconds(elapsedMs: number): string {
+  return (elapsedMs / 1000).toFixed(1);
+}
+
+class HomeIngestionObserver implements IngestionObserver {
+  private readonly handler: (stage: IngestionStage, ocrStatus?: OcrStatus) => void;
+
+  constructor(handler: (stage: IngestionStage, ocrStatus?: OcrStatus) => void) {
+    this.handler = handler;
+  }
+
+  onStage(stage: IngestionStage, ocrStatus?: OcrStatus): void {
+    this.handler(stage, ocrStatus);
+  }
 }
 
 @Entry
@@ -95,8 +115,7 @@ struct Index {
 
   private repository?: ConfigRepository;
   private coordinator?: ConfigVerificationCoordinator;
-  private importService?: ScreenshotImportService;
-  private understandingService?: ScreenshotUnderstandingService;
+  private ingestionCoordinator?: ScreenshotIngestionCoordinator;
   private importConsent?: ImportConsentRepository;
   private cardRepository?: ScreenshotCardRepositoryPort;
   private timelineLoadVersion: number = 0;
@@ -108,12 +127,12 @@ struct Index {
       new VisionVerificationGate(new HarmonyHttpTransport()),
       this.repository
     );
-    this.importService = new ScreenshotImportService(
+    const importService: ScreenshotImportService = new ScreenshotImportService(
       new HarmonyPhotoSelection(),
       new HarmonyPrivateImageStore(context),
       new HarmonyOcrSessionFactory()
     );
-    this.understandingService = new ScreenshotUnderstandingService(
+    const understandingService: ScreenshotUnderstandingService = new ScreenshotUnderstandingService(
       this.repository,
       new HarmonyThumbnailGenerator(context),
       new HarmonyHttpTransport(),
@@ -121,7 +140,13 @@ struct Index {
       new HarmonyUnderstandingMetricsLogger()
     );
     this.importConsent = new ImportConsentRepository(context);
-    this.cardRepository = createScreenshotCardRepository(context);
+    const cardRepository = createScreenshotCardRepository(context);
+    this.cardRepository = cardRepository;
+    this.ingestionCoordinator = new ScreenshotIngestionCoordinator(
+      importService,
+      understandingService,
+      cardRepository
+    );
     this.resolveStartupRoute();
   }
 
@@ -266,60 +291,73 @@ struct Index {
   }
 
   private async runScreenshotImport(): Promise<void> {
-    if (this.importService === undefined || this.understandingService === undefined || this.isImporting) {
+    if (this.ingestionCoordinator === undefined || this.isImporting) {
       return;
     }
     this.isImporting = true;
-    this.setImportNotice('正在选择图片并进行端侧文字识别…', HomeNoticeTone.NEUTRAL);
+    let processingStartedAtMs: number = 0;
+    const observer: IngestionObserver = new HomeIngestionObserver(
+      (stage: IngestionStage, ocrStatus?: OcrStatus): void => {
+        if (stage === IngestionStage.IMPORTING_AND_OCR && processingStartedAtMs === 0) {
+          processingStartedAtMs = Date.now();
+        }
+        this.showIngestionStage(stage, ocrStatus);
+      }
+    );
     try {
-      const outcome: ImportOutcome = await this.importService.importSingle();
-      if (outcome.kind === ImportOutcomeKind.CANCELLED) {
+      const result: IngestionResult = await this.ingestionCoordinator.ingestSingle(observer);
+      if (result.kind === IngestionResultKind.CANCELLED) {
         this.setImportNotice('已取消选择，没有导入任何图片。', HomeNoticeTone.NEUTRAL);
         return;
       }
-      const ready: ReadyImportOutcome = outcome as ReadyImportOutcome;
-      const ocrNeedsRetry: boolean = ready.ocrStatus === OcrStatus.RETRY_PENDING;
-      this.setImportNotice(ocrNeedsRetry ?
-        '端侧 OCR 未识别到文字，正在使用安全缩略图继续理解…' :
-        '端侧 OCR 已完成，正在生成安全缩略图并理解内容…',
-      ocrNeedsRetry ? HomeNoticeTone.WARNING : HomeNoticeTone.NEUTRAL);
-      try {
-        const understandingOutcome: UnderstandingOutcome =
-          await this.understandingService.understand(ready.image, ready.ocrText);
-        const understandingMessage: string =
-          understandingOutcome.understanding.parseStatus === ParseStatus.FALLBACK_INVALID_RESPONSE ?
-            '模型两次返回的内容均不符合契约，已安全回退为未分类结果。' :
-            '缩略图与结构化理解已完成。';
-        if (this.cardRepository === undefined) {
-          this.setImportNotice(`${understandingMessage} 本地卡片存储暂时不可用，卡片未能保存。`,
-            HomeNoticeTone.WARNING);
-        } else {
-          try {
-            await this.cardRepository.create({
-              image: ready.image,
-              outcome: understandingOutcome
-            });
-            await this.loadTimeline();
-            this.setImportNotice(`${understandingMessage} 卡片已保存，时间轴已刷新。`,
-              understandingOutcome.understanding.parseStatus === ParseStatus.FALLBACK_INVALID_RESPONSE ?
-                HomeNoticeTone.WARNING : HomeNoticeTone.SUCCESS);
-          } catch (storageError) {
-            const storageMessage: string = storageError instanceof CardStorageError ? storageError.userMessage :
-              '卡片未能保存到本机，请稍后重试。';
-            this.setImportNotice(`${understandingMessage} ${storageMessage}`, HomeNoticeTone.WARNING);
-          }
-        }
-      } catch (error) {
-        if (error instanceof UnderstandingError) {
-          this.setImportNotice(`${error.category}：${error.userMessage}`, HomeNoticeTone.WARNING);
-        } else {
-          this.setImportNotice('服务错误：模型理解暂时不可用，请稍后重试。', HomeNoticeTone.WARNING);
-        }
+      if (result.kind === IngestionResultKind.FAILED) {
+        const failure: FailedIngestionResult = result as FailedIngestionResult;
+        this.setImportNotice(`${failure.errorCategory}：${failure.userMessage}`,
+          HomeNoticeTone.WARNING);
+        return;
       }
+
+      const saved: SavedIngestionResult = result as SavedIngestionResult;
+
+      this.showIngestionStage(IngestionStage.REFRESHING_TIMELINE);
+      await this.loadTimeline();
+      if (this.timelineErrorMessage.length > 0) {
+        this.setImportNotice('卡片已保存，但时间轴暂时无法刷新。请稍后重试。', HomeNoticeTone.WARNING);
+        return;
+      }
+      const elapsedMs: number = processingStartedAtMs === 0 ? 0 : Date.now() - processingStartedAtMs;
+      const elapsedText: string = processingStartedAtMs === 0 ? '耗时未记录' : `用时 ${formatSeconds(elapsedMs)} 秒`;
+      const ocrText: string = saved.ocrStatus === OcrStatus.RETRY_PENDING ?
+        '端侧 OCR 未识别到文字，已通过图片理解继续处理。' : '';
+      const fallback: boolean = saved.parseStatus === ParseStatus.FALLBACK_INVALID_RESPONSE;
+      const slow: boolean = elapsedMs > 15000;
+      const completionText: string = fallback ? '模型内容校验两次未通过，已保存为未分类卡片。' :
+        '卡片已保存，时间轴已刷新。';
+      const performanceText: string = slow ? ' 超过 15 秒性能目标。' : '';
+      this.setImportNotice(`${ocrText}${completionText}${elapsedText}。${performanceText}`,
+        fallback || slow || saved.ocrStatus === OcrStatus.RETRY_PENDING ? HomeNoticeTone.WARNING :
+          HomeNoticeTone.SUCCESS);
     } catch (_error) {
-      this.setImportNotice('导入失败。请确认图片可读取后重试。', HomeNoticeTone.WARNING);
+      this.setImportNotice('处理失败：请稍后重试。', HomeNoticeTone.WARNING);
     } finally {
       this.isImporting = false;
+    }
+  }
+
+  private showIngestionStage(stage: IngestionStage, ocrStatus?: OcrStatus): void {
+    if (stage === IngestionStage.WAITING_FOR_SELECTION) {
+      this.setImportNotice('请选择一张要整理的截图…', HomeNoticeTone.NEUTRAL);
+    } else if (stage === IngestionStage.IMPORTING_AND_OCR) {
+      this.setImportNotice('正在保存图片并进行端侧文字识别…', HomeNoticeTone.NEUTRAL);
+    } else if (stage === IngestionStage.UNDERSTANDING) {
+      this.setImportNotice(ocrStatus === OcrStatus.RETRY_PENDING ?
+        '端侧 OCR 未识别到文字，正在使用安全缩略图继续理解…' :
+        '端侧 OCR 已完成，正在生成安全缩略图并理解内容…',
+      ocrStatus === OcrStatus.RETRY_PENDING ? HomeNoticeTone.WARNING : HomeNoticeTone.NEUTRAL);
+    } else if (stage === IngestionStage.SAVING) {
+      this.setImportNotice('内容已读懂，正在保存本地卡片…', HomeNoticeTone.NEUTRAL);
+    } else {
+      this.setImportNotice('卡片已保存，正在刷新时间轴…', HomeNoticeTone.NEUTRAL);
     }
   }
 
