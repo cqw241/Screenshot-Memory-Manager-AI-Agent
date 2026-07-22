@@ -27,6 +27,12 @@ class FakeServiceURLParser implements ServiceURLParser {
         origin: 'https://api.example.com', serialized: rawURL
       };
     }
+    if (rawURL === 'https://dashscope.aliyuncs.com/compatible-mode/v1') {
+      return {
+        protocol: 'https:', hostname: 'dashscope.aliyuncs.com', username: '', password: '', search: '', hash: '',
+        origin: 'https://dashscope.aliyuncs.com', serialized: rawURL
+      };
+    }
     if (rawURL === 'http://example.com/v1') {
       return {
         protocol: 'http:', hostname: 'example.com', username: '', password: '', search: '', hash: '',
@@ -87,8 +93,9 @@ class FakeWriter implements VerifiedConfigWriter {
   }
 }
 
-function candidate(baseURL: string = 'https://api.example.com/v1'): VerificationCandidate {
-  return { baseURL: baseURL, apiKey: 'test-only-key', model: 'vision-model' };
+function candidate(baseURL: string = 'https://api.example.com/v1', model: string = 'vision-model'):
+  VerificationCandidate {
+  return { baseURL: baseURL, apiKey: 'test-only-key', model: model };
 }
 
 function confirmations(): VerificationConfirmations {
@@ -133,6 +140,21 @@ export default function visionVerificationTest() {
       expect(transport.lastRequest?.body.includes('"type":"image_url"')).assertTrue();
       expect(transport.lastRequest?.body.includes('data:image/png;base64,')).assertTrue();
       expect(transport.lastRequest?.body.includes('"model":"vision-model"')).assertTrue();
+      expect(transport.lastRequest?.body.includes('"detail"')).assertFalse();
+      expect(transport.lastRequest?.body.includes('"enable_thinking"')).assertFalse();
+    });
+
+    it('disables thinking for another supported DashScope vision model', 0, async () => {
+      const transport: FakeTransport = new FakeTransport();
+      const verifier: VisionVerificationGate = gate(transport);
+
+      await verifier.verify(candidate('https://dashscope.aliyuncs.com/compatible-mode/v1', 'qwen3.5-flash'),
+        confirmations());
+
+      expect(transport.lastRequest?.url)
+        .assertEqual('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions');
+      expect(transport.lastRequest?.body.includes('"enable_thinking":false')).assertTrue();
+      expect(transport.lastRequest?.body.includes('"detail"')).assertFalse();
     });
 
     it('accepts text array content', 0, async () => {

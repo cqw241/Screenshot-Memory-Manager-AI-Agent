@@ -12,6 +12,24 @@ import {
 import { AppPage, StartupRoute } from '../models/AppFlow';
 import { VerifiedConfigMetadata } from '../models/ModelConfig';
 import {
+  buildTimelineSections,
+  CardBadgeTone,
+  TimelineCardViewData,
+  TimelineSectionViewData
+} from '../models/ScreenshotCardPresentation';
+import {
+  CardStorageError,
+  CardStorageErrorCategory,
+  ScreenshotCard,
+  ScreenshotCardRepositoryPort
+} from '../models/ScreenshotCardModels';
+import {
+  OcrStatus
+} from '../models/ScreenshotImportModels';
+import {
+  ParseStatus
+} from '../models/StructuredUnderstandingModels';
+import {
   VerificationCandidate,
   VerificationConfirmations,
   VerificationError,
@@ -22,9 +40,52 @@ import { ConfigVerificationCoordinator } from '../services/ConfigVerificationCoo
 import { ConfigRepository } from '../services/ConfigRepository';
 import { createConfigRepository } from '../services/ConfigRepositoryFactory';
 import { HarmonyHttpTransport } from '../services/HarmonyHttpTransport';
+import { HarmonyOcrSessionFactory } from '../services/HarmonyOcrSession';
+import { HarmonyPhotoSelection } from '../services/HarmonyPhotoSelection';
+import { HarmonyPrivateImageStore } from '../services/HarmonyPrivateImageStore';
+import { HarmonyThumbnailGenerator } from '../services/HarmonyThumbnailGenerator';
+import {
+  HarmonyUnderstandingClock,
+  HarmonyUnderstandingMetricsLogger
+} from '../services/HarmonyUnderstandingRuntime';
+import { ImportConsentRepository } from '../services/ImportConsentRepository';
+import { ScreenshotImportService } from '../services/ScreenshotImportService';
+import {
+  FailedIngestionResult,
+  IngestionObserver,
+  IngestionResult,
+  IngestionResultKind,
+  IngestionStage,
+  SavedIngestionResult,
+  ScreenshotIngestionCoordinator
+} from '../services/ScreenshotIngestionCoordinator';
+import { createScreenshotCardRepository } from '../services/ScreenshotCardRepositoryFactory';
+import { ScreenshotUnderstandingService } from '../services/ScreenshotUnderstandingService';
 import { parseOrigin } from '../services/UrlPreflight';
 import { VisionVerificationGate } from '../services/VisionVerificationGate';
 import { StartupRouter } from '../services/StartupRouter';
+
+enum HomeNoticeTone {
+  NEUTRAL = 'NEUTRAL',
+  SUCCESS = 'SUCCESS',
+  WARNING = 'WARNING'
+}
+
+function formatSeconds(elapsedMs: number): string {
+  return (elapsedMs / 1000).toFixed(1);
+}
+
+class HomeIngestionObserver implements IngestionObserver {
+  private readonly handler: (stage: IngestionStage, ocrStatus?: OcrStatus) => void;
+
+  constructor(handler: (stage: IngestionStage, ocrStatus?: OcrStatus) => void) {
+    this.handler = handler;
+  }
+
+  onStage(stage: IngestionStage, ocrStatus?: OcrStatus): void {
+    this.handler(stage, ocrStatus);
+  }
+}
 
 @Entry
 @Component
@@ -43,9 +104,21 @@ struct Index {
   @State private errorMessage: string = '';
   @State private verificationSucceeded: boolean = false;
   @State private activeModel: string = '';
+  @State private isImporting: boolean = false;
+  @State private importStatus: string = '';
+  @State private importNoticeTone: HomeNoticeTone = HomeNoticeTone.NEUTRAL;
+  @State private timelineSections: TimelineSectionViewData[] = [];
+  @State private timelineCardCount: number = 0;
+  @State private timelineLoading: boolean = true;
+  @State private timelineErrorCategory: string = '';
+  @State private timelineErrorMessage: string = '';
 
   private repository?: ConfigRepository;
   private coordinator?: ConfigVerificationCoordinator;
+  private ingestionCoordinator?: ScreenshotIngestionCoordinator;
+  private importConsent?: ImportConsentRepository;
+  private cardRepository?: ScreenshotCardRepositoryPort;
+  private timelineLoadVersion: number = 0;
 
   aboutToAppear(): void {
     const context: common.UIAbilityContext = getContext(this) as common.UIAbilityContext;
@@ -54,7 +127,33 @@ struct Index {
       new VisionVerificationGate(new HarmonyHttpTransport()),
       this.repository
     );
+    const importService: ScreenshotImportService = new ScreenshotImportService(
+      new HarmonyPhotoSelection(),
+      new HarmonyPrivateImageStore(context),
+      new HarmonyOcrSessionFactory()
+    );
+    const understandingService: ScreenshotUnderstandingService = new ScreenshotUnderstandingService(
+      this.repository,
+      new HarmonyThumbnailGenerator(context),
+      new HarmonyHttpTransport(),
+      new HarmonyUnderstandingClock(),
+      new HarmonyUnderstandingMetricsLogger()
+    );
+    this.importConsent = new ImportConsentRepository(context);
+    const cardRepository = createScreenshotCardRepository(context);
+    this.cardRepository = cardRepository;
+    this.ingestionCoordinator = new ScreenshotIngestionCoordinator(
+      importService,
+      understandingService,
+      cardRepository
+    );
     this.resolveStartupRoute();
+  }
+
+  onPageShow(): void {
+    if (this.currentPage === AppPage.HOME && this.cardRepository !== undefined) {
+      this.loadTimeline();
+    }
   }
 
   private async resolveStartupRoute(): Promise<void> {
@@ -80,6 +179,7 @@ struct Index {
       if (metadata !== undefined) {
         this.activeModel = metadata.model;
         this.currentPage = AppPage.HOME;
+        await this.loadTimeline();
       } else {
         this.recoveryRequired = true;
         this.resetDraft();
@@ -90,6 +190,180 @@ struct Index {
       this.resetDraft();
       this.currentPage = AppPage.WIZARD;
     }
+  }
+
+  private async loadTimeline(): Promise<void> {
+    if (this.cardRepository === undefined) {
+      return;
+    }
+    const loadVersion: number = ++this.timelineLoadVersion;
+    this.timelineLoading = true;
+    try {
+      const cards: ScreenshotCard[] = await this.cardRepository.listTimeline();
+      if (loadVersion !== this.timelineLoadVersion) {
+        return;
+      }
+      this.timelineSections = buildTimelineSections(cards);
+      this.timelineCardCount = cards.length;
+      this.timelineErrorCategory = '';
+      this.timelineErrorMessage = '';
+    } catch (error) {
+      if (loadVersion !== this.timelineLoadVersion) {
+        return;
+      }
+      this.timelineSections = [];
+      this.timelineCardCount = 0;
+      if (error instanceof CardStorageError) {
+        this.timelineErrorCategory = error.category;
+        this.timelineErrorMessage = error.userMessage;
+      } else {
+        this.timelineErrorCategory = CardStorageErrorCategory.READ;
+        this.timelineErrorMessage = '暂时无法读取本地卡片。';
+      }
+    } finally {
+      if (loadVersion === this.timelineLoadVersion) {
+        this.timelineLoading = false;
+      }
+    }
+  }
+
+  private async openCardDetail(cardId: string): Promise<void> {
+    try {
+      await this.getUIContext().getRouter().pushUrl({
+        url: 'pages/CardDetail',
+        params: { cardId: cardId }
+      });
+    } catch (_error) {
+      this.setImportNotice('暂时无法打开卡片详情，请稍后重试。', HomeNoticeTone.WARNING);
+    }
+  }
+
+  private async requestScreenshotImport(): Promise<void> {
+    if (this.isImporting || this.repository === undefined || this.importConsent === undefined) {
+      return;
+    }
+    try {
+      const metadata: VerifiedConfigMetadata | undefined = await this.repository.getMetadata();
+      if (metadata === undefined) {
+        this.setImportNotice('已验证配置不可用，请先重新配置模型。', HomeNoticeTone.WARNING);
+        return;
+      }
+      if (await this.importConsent.hasConsent(metadata.trustedOrigin)) {
+        await this.runScreenshotImport();
+        return;
+      }
+      this.showImportConsent(metadata.trustedOrigin, targetHost(metadata.baseURL));
+    } catch (_error) {
+      this.setImportNotice('无法读取导入授权状态，请稍后重试。', HomeNoticeTone.WARNING);
+    }
+  }
+
+  private showImportConsent(origin: string, host: string): void {
+    this.getUIContext().showAlertDialog({
+      title: '发送截图前确认',
+      message: `拾光会先在设备端识别文字，再把 OCR 文本和长边不超过 1024px 的缩略图发送到 ${host}。原图不会上传。是否继续？`,
+      primaryButton: {
+        value: '同意并选择图片',
+        fontColor: '#2C4438',
+        action: () => {
+          this.grantConsentAndImport(origin);
+        }
+      },
+      secondaryButton: {
+        value: '取消',
+        fontColor: '#77736A',
+        action: () => {
+        }
+      }
+    });
+  }
+
+  private async grantConsentAndImport(origin: string): Promise<void> {
+    if (this.importConsent === undefined) {
+      return;
+    }
+    try {
+      await this.importConsent.grant(origin);
+      await this.runScreenshotImport();
+    } catch (_error) {
+      this.setImportNotice('未能保存发送确认，请稍后重试。', HomeNoticeTone.WARNING);
+    }
+  }
+
+  private async runScreenshotImport(): Promise<void> {
+    if (this.ingestionCoordinator === undefined || this.isImporting) {
+      return;
+    }
+    this.isImporting = true;
+    let processingStartedAtMs: number = 0;
+    const observer: IngestionObserver = new HomeIngestionObserver(
+      (stage: IngestionStage, ocrStatus?: OcrStatus): void => {
+        if (stage === IngestionStage.IMPORTING_AND_OCR && processingStartedAtMs === 0) {
+          processingStartedAtMs = Date.now();
+        }
+        this.showIngestionStage(stage, ocrStatus);
+      }
+    );
+    try {
+      const result: IngestionResult = await this.ingestionCoordinator.ingestSingle(observer);
+      if (result.kind === IngestionResultKind.CANCELLED) {
+        this.setImportNotice('已取消选择，没有导入任何图片。', HomeNoticeTone.NEUTRAL);
+        return;
+      }
+      if (result.kind === IngestionResultKind.FAILED) {
+        const failure: FailedIngestionResult = result as FailedIngestionResult;
+        this.setImportNotice(`${failure.errorCategory}：${failure.userMessage}`,
+          HomeNoticeTone.WARNING);
+        return;
+      }
+
+      const saved: SavedIngestionResult = result as SavedIngestionResult;
+
+      this.showIngestionStage(IngestionStage.REFRESHING_TIMELINE);
+      await this.loadTimeline();
+      if (this.timelineErrorMessage.length > 0) {
+        this.setImportNotice('卡片已保存，但时间轴暂时无法刷新。请稍后重试。', HomeNoticeTone.WARNING);
+        return;
+      }
+      const elapsedMs: number = processingStartedAtMs === 0 ? 0 : Date.now() - processingStartedAtMs;
+      const elapsedText: string = processingStartedAtMs === 0 ? '耗时未记录' : `用时 ${formatSeconds(elapsedMs)} 秒`;
+      const ocrText: string = saved.ocrStatus === OcrStatus.RETRY_PENDING ?
+        '端侧 OCR 未识别到文字，已通过图片理解继续处理。' : '';
+      const fallback: boolean = saved.parseStatus === ParseStatus.FALLBACK_INVALID_RESPONSE;
+      const slow: boolean = elapsedMs > 15000;
+      const completionText: string = fallback ? '模型内容校验两次未通过，已保存为未分类卡片。' :
+        '卡片已保存，时间轴已刷新。';
+      const performanceText: string = slow ? ' 超过 15 秒性能目标。' : '';
+      this.setImportNotice(`${ocrText}${completionText}${elapsedText}。${performanceText}`,
+        fallback || slow || saved.ocrStatus === OcrStatus.RETRY_PENDING ? HomeNoticeTone.WARNING :
+          HomeNoticeTone.SUCCESS);
+    } catch (_error) {
+      this.setImportNotice('处理失败：请稍后重试。', HomeNoticeTone.WARNING);
+    } finally {
+      this.isImporting = false;
+    }
+  }
+
+  private showIngestionStage(stage: IngestionStage, ocrStatus?: OcrStatus): void {
+    if (stage === IngestionStage.WAITING_FOR_SELECTION) {
+      this.setImportNotice('请选择一张要整理的截图…', HomeNoticeTone.NEUTRAL);
+    } else if (stage === IngestionStage.IMPORTING_AND_OCR) {
+      this.setImportNotice('正在保存图片并进行端侧文字识别…', HomeNoticeTone.NEUTRAL);
+    } else if (stage === IngestionStage.UNDERSTANDING) {
+      this.setImportNotice(ocrStatus === OcrStatus.RETRY_PENDING ?
+        '端侧 OCR 未识别到文字，正在使用安全缩略图继续理解…' :
+        '端侧 OCR 已完成，正在生成安全缩略图并理解内容…',
+      ocrStatus === OcrStatus.RETRY_PENDING ? HomeNoticeTone.WARNING : HomeNoticeTone.NEUTRAL);
+    } else if (stage === IngestionStage.SAVING) {
+      this.setImportNotice('内容已读懂，正在保存本地卡片…', HomeNoticeTone.NEUTRAL);
+    } else {
+      this.setImportNotice('卡片已保存，正在刷新时间轴…', HomeNoticeTone.NEUTRAL);
+    }
+  }
+
+  private setImportNotice(message: string, tone: HomeNoticeTone): void {
+    this.importStatus = message;
+    this.importNoticeTone = tone;
   }
 
   private resetDraft(): void {
@@ -194,6 +468,7 @@ struct Index {
       this.activeModel = this.model.trim();
       this.recoveryRequired = false;
       this.currentPage = AppPage.HOME;
+      await this.loadTimeline();
     } catch (error) {
       if (error instanceof VerificationError) {
         this.errorCategory = error.category;
@@ -709,80 +984,413 @@ struct Index {
     .backgroundColor('#F2EFE7')
   }
 
-  @Builder
-  private TimelinePage() {
-    Column() {
-      Column({ space: 28 }) {
-        Row() {
-          Column({ space: 4 }) {
-            Text('拾光 · TIMELINE')
-              .fontSize(11)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#A65B24')
-              .letterSpacing(1.4)
-            Text('你的时间轴')
-              .fontSize(30)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#20201D')
-          }
-          .layoutWeight(1)
-          .alignItems(HorizontalAlign.Start)
-          Button('模型设置  ···')
-            .fontSize(13)
-            .fontColor('#FFFDF8')
-            .backgroundColor('#2C4438')
-            .borderRadius(14)
-            .height(42)
-            .onClick(() => this.openSettings())
-        }
-        .width('100%')
-        .alignItems(VerticalAlign.Center)
+  private noticeBackgroundColor(): string {
+    if (this.importNoticeTone === HomeNoticeTone.WARNING) {
+      return '#FFF1E7';
+    }
+    return this.importNoticeTone === HomeNoticeTone.SUCCESS ? '#E8F1EA' : '#F1EEE6';
+  }
 
-        Column({ space: 20 }) {
-          Stack({ alignContent: Alignment.Center }) {
-            Circle()
-              .width(104)
-              .height(104)
-              .fill('#EEE8DB')
-            Circle()
-              .width(66)
-              .height(66)
-              .fill('#FFFDF8')
-              .stroke('#D8CEBB')
-              .strokeWidth(1)
-            Text('＋')
-              .fontSize(30)
-              .fontColor('#A65B24')
-          }
-          Column({ space: 8 }) {
-            Text('第一段记忆，等待抵达')
-              .fontSize(21)
-              .fontWeight(FontWeight.Bold)
-              .fontColor('#292823')
-            Text('模型连接已经就绪。后续 Story 会在这里加入截图导入、理解结果和可回望的时间卡片。')
-              .fontSize(13)
-              .fontColor('#77736A')
-              .lineHeight(20)
-              .textAlign(TextAlign.Center)
-              .width('82%')
-          }
-          .alignItems(HorizontalAlign.Center)
-          if (this.activeModel.length > 0) {
-            Text(`当前模型 · ${this.activeModel}`)
-              .fontSize(11)
-              .fontColor('#5C655E')
-              .padding({ left: 12, right: 12, top: 7, bottom: 7 })
-              .backgroundColor('#E8EFE9')
-              .borderRadius(10)
+  private noticeTextColor(): string {
+    if (this.importNoticeTone === HomeNoticeTone.WARNING) {
+      return '#8A4A2B';
+    }
+    return this.importNoticeTone === HomeNoticeTone.SUCCESS ? '#2C6A4E' : '#666158';
+  }
+
+  private badgeBackgroundColor(tone: CardBadgeTone): string {
+    if (tone === CardBadgeTone.FOREST) {
+      return '#E3EEE7';
+    }
+    if (tone === CardBadgeTone.CLAY) {
+      return '#F7E6D8';
+    }
+    if (tone === CardBadgeTone.AMBER) {
+      return '#F6EDCF';
+    }
+    return '#ECE9E2';
+  }
+
+  private badgeTextColor(tone: CardBadgeTone): string {
+    if (tone === CardBadgeTone.FOREST) {
+      return '#2C6A4E';
+    }
+    if (tone === CardBadgeTone.CLAY) {
+      return '#9A542A';
+    }
+    if (tone === CardBadgeTone.AMBER) {
+      return '#8A671C';
+    }
+    return '#6F6B62';
+  }
+
+  @Builder
+  private TimelineImportPanel() {
+    Column({ space: 10 }) {
+      Row({ space: 10 }) {
+        Button() {
+          Row({ space: 9 }) {
+            if (this.isImporting) {
+              LoadingProgress()
+                .width(18)
+                .height(18)
+                .color('#FFFDF8')
+              Text('正在读懂截图…')
+                .fontSize(14)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#FFFDF8')
+            } else {
+              Text('＋')
+                .fontSize(18)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#E7C391')
+              Text('从相册导入截图')
+                .fontSize(14)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#FFFDF8')
+            }
           }
         }
         .layoutWeight(1)
+        .height(48)
+        .enabled(!this.isImporting)
+        .backgroundColor(this.isImporting ? '#819087' : '#2C4438')
+        .borderRadius(14)
+        .onClick(() => this.requestScreenshotImport())
+
+        if (this.activeModel.length > 0) {
+          Column({ space: 2 }) {
+            Text('ACTIVE MODEL')
+              .fontSize(8)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#78847B')
+              .letterSpacing(0.7)
+            Text(this.activeModel)
+              .fontSize(10)
+              .fontWeight(FontWeight.Medium)
+              .fontColor('#405148')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+          .width(108)
+          .height(48)
+          .justifyContent(FlexAlign.Center)
+          .alignItems(HorizontalAlign.Start)
+          .padding({ left: 10, right: 10 })
+          .backgroundColor('#E7EEE8')
+          .borderRadius(14)
+        }
+      }
+      .width('100%')
+
+      if (this.importStatus.length > 0) {
+        Text(this.importStatus)
+          .fontSize(12)
+          .fontColor(this.noticeTextColor())
+          .lineHeight(18)
+          .width('100%')
+          .padding({ left: 12, right: 12, top: 10, bottom: 10 })
+          .backgroundColor(this.noticeBackgroundColor())
+          .borderRadius(11)
+      }
+    }
+    .width('100%')
+  }
+
+  @Builder
+  private TimelineLoadingState() {
+    Column({ space: 13 }) {
+      LoadingProgress()
+        .width(30)
+        .height(30)
+        .color('#A65B24')
+      Text('正在整理你的记忆')
+        .fontSize(15)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#3F3D37')
+      Text('按事件时间编排本地卡片…')
+        .fontSize(12)
+        .fontColor('#8A867D')
+    }
+    .width('100%')
+    .padding({ top: 56, bottom: 56 })
+  }
+
+  @Builder
+  private TimelineEmptyState() {
+    Column({ space: 14 }) {
+      Stack() {
+        Circle()
+          .width(76)
+          .height(76)
+          .fill('#E5DDD0')
+        Circle()
+          .width(54)
+          .height(54)
+          .fill('#2C4438')
+        Text('拾')
+          .fontSize(21)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#F4D7A5')
+      }
+      Text('试试导入一张截图')
+        .fontSize(20)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#292823')
+      Text('海报、取件码、DDL 通知或优惠券都可以。\n拾光会在本机保存整理后的卡片。')
+        .fontSize(13)
+        .fontColor('#77736A')
+        .lineHeight(20)
+        .textAlign(TextAlign.Center)
+      Button('选择第一张截图  →')
+        .fontSize(13)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#2C4438')
+        .height(42)
+        .padding({ left: 18, right: 18 })
+        .backgroundColor('#E6D6BE')
+        .borderRadius(13)
+        .enabled(!this.isImporting)
+        .onClick(() => this.requestScreenshotImport())
+    }
+    .width('100%')
+    .padding({ top: 42, bottom: 48, left: 24, right: 24 })
+    .backgroundColor('#FFFDF8')
+    .border({ width: 1, color: '#E8E2D5' })
+    .borderRadius(22)
+  }
+
+  @Builder
+  private TimelineErrorState() {
+    Column({ space: 12 }) {
+      Text('!')
+        .fontSize(20)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#FFFDF8')
+        .width(42)
+        .height(42)
+        .textAlign(TextAlign.Center)
+        .backgroundColor('#A84832')
+        .borderRadius(21)
+      Text(this.timelineErrorCategory)
+        .fontSize(17)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#68372C')
+      Text(this.timelineErrorMessage)
+        .fontSize(13)
+        .fontColor('#7A4A3E')
+        .lineHeight(20)
+        .textAlign(TextAlign.Center)
+      Button('重新加载')
+        .fontSize(13)
+        .fontWeight(FontWeight.Bold)
+        .fontColor('#FFFDF8')
+        .height(40)
+        .padding({ left: 20, right: 20 })
+        .backgroundColor('#7A493C')
+        .borderRadius(12)
+        .onClick(() => this.loadTimeline())
+    }
+    .width('100%')
+    .padding({ top: 34, bottom: 34, left: 22, right: 22 })
+    .backgroundColor('#FFF0EC')
+    .border({ width: 1, color: '#E8C4BA' })
+    .borderRadius(20)
+  }
+
+  @Builder
+  private TimelineMemoryCard(card: TimelineCardViewData) {
+    Row({ space: 13 }) {
+      Stack() {
+        Text('拾')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#B5A58F')
+        Image(card.thumbnailUri)
+          .width(82)
+          .height(104)
+          .objectFit(ImageFit.Cover)
+          .borderRadius(12)
+      }
+      .width(82)
+      .height(104)
+      .backgroundColor('#E8E1D5')
+      .borderRadius(12)
+
+      Column({ space: 5 }) {
+        Row() {
+          Text(card.typeLabel)
+            .fontSize(10)
+            .fontWeight(FontWeight.Bold)
+            .fontColor(this.badgeTextColor(card.badgeTone))
+            .padding({ left: 7, right: 7, top: 4, bottom: 4 })
+            .backgroundColor(this.badgeBackgroundColor(card.badgeTone))
+            .borderRadius(7)
+          Blank()
+          Text(card.parseStatusLabel)
+            .fontSize(9)
+            .fontColor('#928D83')
+        }
         .width('100%')
-        .justifyContent(FlexAlign.Center)
+        Text(card.title)
+          .fontSize(17)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#292823')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+        ForEach(card.entityLines, (line: string) => {
+          Text(line)
+            .fontSize(11)
+            .fontColor('#6C675E')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }, (line: string) => line)
+        if (card.actionText.length > 0) {
+          Text(`建议 · ${card.actionText}`)
+            .fontSize(10)
+            .fontWeight(FontWeight.Medium)
+            .fontColor('#526D5E')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Top)
+    .padding(13)
+    .backgroundColor('#FFFDF8')
+    .border({ width: 1, color: '#E8E2D5' })
+    .borderRadius(18)
+    .shadow({ radius: 12, color: '#14000000', offsetY: 5 })
+    .onClick(() => this.openCardDetail(card.id))
+  }
+
+  @Builder
+  private TimelineSection(section: TimelineSectionViewData) {
+    Column({ space: 10 }) {
+      Row({ space: 10 }) {
+        Text(section.label)
+          .fontSize(13)
+          .fontWeight(FontWeight.Bold)
+          .fontColor('#5C574E')
+        Divider()
+          .layoutWeight(1)
+          .color('#DED6C8')
+          .strokeWidth(1)
+      }
+      .width('100%')
+
+      Column({ space: 12 }) {
+        ForEach(section.cards, (card: TimelineCardViewData) => {
+          Row({ space: 10 }) {
+            Column() {
+              Circle()
+                .width(10)
+                .height(10)
+                .fill('#A65B24')
+            }
+            .width(12)
+            .padding({ top: 21 })
+            this.TimelineMemoryCard(card)
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Top)
+        }, (card: TimelineCardViewData) => card.id)
+      }
+      .width('100%')
+      .padding({ left: 3 })
+      .border({ width: { left: 2 }, color: '#DED6C8' })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  private TimelinePage() {
+    Column() {
+      Scroll() {
+        Column({ space: 20 }) {
+          Row() {
+            Column({ space: 4 }) {
+              Text('拾光 · TIMELINE')
+                .fontSize(11)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#A65B24')
+                .letterSpacing(1.4)
+              Text('你的时间轴')
+                .fontSize(30)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#20201D')
+            }
+            .layoutWeight(1)
+            .alignItems(HorizontalAlign.Start)
+            Button('模型设置  ···')
+              .fontSize(12)
+              .fontColor('#FFFDF8')
+              .backgroundColor('#2C4438')
+              .borderRadius(14)
+              .height(40)
+              .onClick(() => this.openSettings())
+          }
+          .width('100%')
+          .alignItems(VerticalAlign.Center)
+
+          this.TimelineImportPanel()
+
+          Row() {
+            Column({ space: 3 }) {
+              Text('RECENT MEMORIES')
+                .fontSize(9)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#A65B24')
+                .letterSpacing(1.1)
+              Text('最近记忆')
+                .fontSize(20)
+                .fontWeight(FontWeight.Bold)
+                .fontColor('#292823')
+            }
+            .alignItems(HorizontalAlign.Start)
+            Blank()
+            Text(`${this.timelineCardCount} 张`)
+              .fontSize(11)
+              .fontWeight(FontWeight.Bold)
+              .fontColor('#667068')
+              .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+              .backgroundColor('#E7EEE8')
+              .borderRadius(10)
+          }
+          .width('100%')
+
+          if (this.timelineLoading && this.timelineSections.length === 0) {
+            this.TimelineLoadingState()
+          } else if (this.timelineErrorMessage.length > 0) {
+            this.TimelineErrorState()
+          } else if (this.timelineCardCount === 0) {
+            this.TimelineEmptyState()
+          } else {
+            Column({ space: 22 }) {
+              ForEach(this.timelineSections, (section: TimelineSectionViewData) => {
+                this.TimelineSection(section)
+              }, (section: TimelineSectionViewData) => section.key)
+            }
+            .width('100%')
+          }
+
+          Text('图片与卡片只保存在本机 · 按事件时间倒序排列')
+            .fontSize(10)
+            .fontColor('#969187')
+            .textAlign(TextAlign.Center)
+            .width('100%')
+            .padding({ top: 4, bottom: 18 })
+        }
+        .width('100%')
+        .padding({ left: 20, right: 20, top: 28 })
       }
       .layoutWeight(1)
       .width('100%')
-      .padding({ left: 20, right: 20, top: 30 })
+      .scrollBar(BarState.Off)
 
       Row() {
         Column({ space: 5 }) {
@@ -815,7 +1423,7 @@ struct Index {
         .layoutWeight(1)
       }
       .width('100%')
-      .height(76)
+      .height(72)
       .alignItems(VerticalAlign.Center)
       .padding({ left: 14, right: 14 })
       .backgroundColor('#FFFDF8')

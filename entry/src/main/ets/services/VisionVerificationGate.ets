@@ -16,6 +16,7 @@ import {
   ServiceURLParser,
   UrlPreflightResult
 } from './UrlPreflight';
+import { shouldDisableThinking } from './ChatRequestCompatibility';
 import { chooseChallenge, VisionChallenge } from './VisionChallenges';
 
 interface ChatContentPart {
@@ -26,7 +27,6 @@ interface ChatContentPart {
 
 interface ChatImageURL {
   url: string;
-  detail: string;
 }
 
 interface ChatMessage {
@@ -39,6 +39,7 @@ interface ChatCompletionRequestBody {
   messages: ChatMessage[];
   temperature: number;
   max_tokens: number;
+  enable_thinking?: boolean;
 }
 
 interface CompletionTextPart {
@@ -86,7 +87,7 @@ export class VisionVerificationGate {
     const request: HttpTransportRequest = {
       url: target.endpointURL,
       apiKey: candidate.apiKey,
-      body: this.buildRequestBody(candidate.model.trim(), challenge),
+      body: this.buildRequestBody(candidate.model.trim(), challenge, target.origin),
       timeoutMs: REQUEST_TIMEOUT_MS
     };
 
@@ -123,11 +124,11 @@ export class VisionVerificationGate {
     };
   }
 
-  private buildRequestBody(model: string, challenge: VisionChallenge): string {
+  private buildRequestBody(model: string, challenge: VisionChallenge, origin: string): string {
     const textPart: ChatContentPart = { type: 'text', text: challenge.prompt };
     const imagePart: ChatContentPart = {
       type: 'image_url',
-      image_url: { url: challenge.imageDataURL, detail: 'low' }
+      image_url: { url: challenge.imageDataURL }
     };
     const message: ChatMessage = { role: 'user', content: [textPart, imagePart] };
     const body: ChatCompletionRequestBody = {
@@ -136,6 +137,9 @@ export class VisionVerificationGate {
       temperature: 0,
       max_tokens: 12
     };
+    if (shouldDisableThinking(origin, model)) {
+      body.enable_thinking = false;
+    }
     return JSON.stringify(body);
   }
 

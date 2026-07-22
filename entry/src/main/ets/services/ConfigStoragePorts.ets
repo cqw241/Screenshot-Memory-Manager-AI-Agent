@@ -15,6 +15,10 @@ export interface VerifiedConfigWriter {
   replaceVerified(config: RuntimeModelConfig): Promise<void>;
 }
 
+export interface VerifiedConfigAccess {
+  withVerifiedConfig<T>(action: (config: RuntimeModelConfig) => Promise<T>): Promise<T>;
+}
+
 export interface ConfigStateReader {
   getState(): Promise<ConfigState>;
 }
