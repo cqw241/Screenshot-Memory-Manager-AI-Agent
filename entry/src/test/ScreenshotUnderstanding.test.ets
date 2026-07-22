@@ -117,19 +117,31 @@ class FakeLogger implements UnderstandingMetricsLogger {
 
 class FakeURLParser implements ServiceURLParser {
   parse(rawURL: string): ParsedServiceURL {
-    if (rawURL !== 'https://api.example.com/v1') {
-      throw new Error('invalid test URL');
+    if (rawURL === 'https://api.example.com/v1') {
+      return {
+        protocol: 'https:',
+        hostname: 'api.example.com',
+        username: '',
+        password: '',
+        search: '',
+        hash: '',
+        origin: 'https://api.example.com',
+        serialized: rawURL
+      };
     }
-    return {
-      protocol: 'https:',
-      hostname: 'api.example.com',
-      username: '',
-      password: '',
-      search: '',
-      hash: '',
-      origin: 'https://api.example.com',
-      serialized: rawURL
-    };
+    if (rawURL === 'https://dashscope.aliyuncs.com/compatible-mode/v1') {
+      return {
+        protocol: 'https:',
+        hostname: 'dashscope.aliyuncs.com',
+        username: '',
+        password: '',
+        search: '',
+        hash: '',
+        origin: 'https://dashscope.aliyuncs.com',
+        serialized: rawURL
+      };
+    }
+    throw new Error('invalid test URL');
   }
 }
 
@@ -233,9 +245,25 @@ export default function screenshotUnderstandingTest() {
       expect(body.includes('America/Tijuana')).assertTrue();
       expect(body.includes('人工智能前沿讲座')).assertTrue();
       expect(body.includes('test-only-key')).assertFalse();
+      expect(body.includes('"detail"')).assertFalse();
+      expect(body.includes('"enable_thinking"')).assertFalse();
       expect(clock.captureCount).assertEqual(1);
       expect(config.runtime.apiKey).assertEqual('');
       expect(transport.requests[0].apiKey).assertEqual('');
+    });
+
+    it('disables thinking for another supported DashScope understanding model', 0, async () => {
+      const transport: FakeTransport = new FakeTransport();
+      const config: FakeConfigAccess = new FakeConfigAccess();
+      config.runtime.baseURL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+      config.runtime.trustedOrigin = 'https://dashscope.aliyuncs.com';
+      config.runtime.model = 'qwen-plus-latest';
+      transport.responses = [{ statusCode: 200, body: completion(validPoster()) }];
+
+      await service(transport, config).understand(TEST_IMAGE, 'OCR');
+
+      expect(transport.requestBodies[0].includes('"enable_thinking":false')).assertTrue();
+      expect(transport.requestBodies[0].includes('"detail"')).assertFalse();
     });
 
     it('accepts all fixed screenshot types and nullable entities', 0, () => {
