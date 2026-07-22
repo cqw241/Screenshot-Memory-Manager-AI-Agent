@@ -1,6 +1,7 @@
 # DevEco Studio / Hvigor
 .hvigor/
 .idea/
+.superpowers/
 **/.preview/
 **/.test/
 **/build/
