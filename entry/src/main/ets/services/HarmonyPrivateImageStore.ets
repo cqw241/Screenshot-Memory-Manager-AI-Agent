@@ -3,6 +3,7 @@ import { util } from '@kit.ArkTS';
 import { fileIo } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { PrivateImageDescriptor } from '../models/ScreenshotImportModels';
+import { ensurePrivateDirectory } from './HarmonyPrivateDirectory';
 import { PrivateImageStorePort } from './ScreenshotImportPorts';
 
 const IMPORT_DIRECTORY: string = 'imports';
@@ -23,7 +24,7 @@ export class HarmonyPrivateImageStore implements PrivateImageStorePort {
       source = image.createImageSource(sourceFile.fd);
       const info: image.ImageInfo = await source.getImageInfo();
       const directory: string = `${this.context.filesDir}/${IMPORT_DIRECTORY}`;
-      await fileIo.mkdir(directory, true);
+      await ensurePrivateDirectory(directory);
       const id: string = util.generateRandomUUID(true);
       destinationPath = `${directory}/${id}${extensionForMimeType(info.mimeType)}`;
       await fileIo.copyFile(sourceFile.fd, destinationPath);

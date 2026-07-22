@@ -4,6 +4,7 @@ import { fileIo } from '@kit.CoreFileKit';
 import { image } from '@kit.ImageKit';
 import { PrivateImageDescriptor } from '../models/ScreenshotImportModels';
 import { ThumbnailDescriptor } from '../models/StructuredUnderstandingModels';
+import { ensurePrivateDirectory } from './HarmonyPrivateDirectory';
 import { ThumbnailGenerator, ThumbnailPayload } from './ScreenshotUnderstandingPorts';
 
 const THUMBNAIL_DIRECTORY: string = 'thumbnails';
@@ -42,7 +43,7 @@ export class HarmonyThumbnailGenerator implements ThumbnailGenerator {
       });
 
       const directory: string = `${this.context.filesDir}/${THUMBNAIL_DIRECTORY}`;
-      await fileIo.mkdir(directory, true);
+      await ensurePrivateDirectory(directory);
       destinationPath = `${directory}/${sourceImage.id}.jpg`;
       destinationFile = await fileIo.open(destinationPath,
         fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
