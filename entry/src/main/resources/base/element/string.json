@@ -7,6 +7,10 @@
     {
       "name": "entry_ability_desc",
       "value": "拾光应用入口"
+    },
+    {
+      "name": "read_imagevideo_reason",
+      "value": "用于 Story 3 平台能力探针读取新增媒体并验证截图自动摄取是否可交付"
     }
   ]
 }

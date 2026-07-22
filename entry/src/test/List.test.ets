@@ -8,6 +8,7 @@ import screenshotIngestionCoordinatorTest from './ScreenshotIngestionCoordinator
 import screenshotUnderstandingTest from './ScreenshotUnderstanding.test';
 import startupRouterTest from './StartupRouter.test';
 import visionVerificationTest from './VisionVerification.test';
+import capabilityProbeTest from './CapabilityProbe.test';
 
 export default function testsuite() {
   chatRequestCompatibilityTest();
@@ -20,4 +21,5 @@ export default function testsuite() {
   screenshotUnderstandingTest();
   startupRouterTest();
   visionVerificationTest();
+  capabilityProbeTest();
 }

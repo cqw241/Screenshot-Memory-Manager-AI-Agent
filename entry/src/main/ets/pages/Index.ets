@@ -238,6 +238,14 @@ struct Index {
     }
   }
 
+  private async openCapabilityProbe(): Promise<void> {
+    try {
+      await this.getUIContext().getRouter().pushUrl({ url: 'pages/CapabilityProbe' });
+    } catch (_error) {
+      this.setImportNotice('暂时无法打开平台能力探针。', HomeNoticeTone.WARNING);
+    }
+  }
+
   private async requestScreenshotImport(): Promise<void> {
     if (this.isImporting || this.repository === undefined || this.importConsent === undefined) {
       return;
@@ -940,6 +948,14 @@ struct Index {
           .lineHeight(17)
           .width('100%')
           .padding({ bottom: 20 })
+
+        Button('Story 3 平台能力探针')
+          .fontSize(12)
+          .fontColor('#6A6258')
+          .backgroundColor('#E9E3D8')
+          .borderRadius(12)
+          .height(40)
+          .onClick(() => this.openCapabilityProbe())
       }
       .width('100%')
       .padding({ left: 18, right: 18, top: 28 })
@@ -1333,6 +1349,13 @@ struct Index {
               .borderRadius(14)
               .height(40)
               .onClick(() => this.openSettings())
+            Button('能力探针')
+              .fontSize(12)
+              .fontColor('#6A6258')
+              .backgroundColor('#E9E3D8')
+              .borderRadius(14)
+              .height(40)
+              .onClick(() => this.openCapabilityProbe())
           }
           .width('100%')
           .alignItems(VerticalAlign.Center)
